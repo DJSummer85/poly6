@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Activity, Bot as BotIcon, Loader2, Play, Plus, Square, Trash2, RotateCcw,
   Shield, Target, Wallet, Search, ArrowUpDown, Wifi, WifiOff, Trophy, AlertTriangle,
-  X, TrendingUp, ScrollText, Clock
+  X, TrendingUp, ScrollText, Clock, History
 } from "lucide-react"
 import { toast } from "sonner"
 import { apiFetch } from "@/lib/utils"
@@ -14,6 +14,13 @@ import { useAppStore } from "@/store"
 // ---- Típusok ----
 type BotStatus = 'running' | 'paused' | 'error' | 'stopped'
 type SortKey = 'pnl' | 'winRate' | 'trades' | 'balance' | 'name'
+
+interface TradeResult {
+  id: string
+  win: boolean
+  amount: number
+  time: string
+}
 
 interface Bot {
   id: string
@@ -25,6 +32,7 @@ interface Bot {
   stop_loss: number
   take_profit: number
   market_id: string
+  history?: TradeResult[] // ÚJ: Egyedi trade napló a botnak
   portfolio?: {
     balance: number
     total_pnl: number
@@ -59,7 +67,6 @@ export default function BotsPage() {
   const [serverOnline, setServerOnline] = useState(true)
   const [mounted, setMounted] = useState(false)
 
-  // Referencia a korábbi bot állapotokhoz (összehasonlításhoz)
   const prevBotsRef = useRef<Bot[]>([])
 
   // UI State
@@ -69,13 +76,12 @@ export default function BotsPage() {
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
   const [quickFilter, setQuickFilter] = useState<'none' | 'best3' | 'worst3'>('none')
 
-  // Napló funkció
   const addLog = useCallback((msg: string, type: LogEntry['type'] = 'info') => {
     const newEntry = { id: Math.random().toString(), time: new Date().toLocaleTimeString(), msg, type }
     setLogs(prev => [newEntry, ...prev].slice(0, 20))
   }, [])
 
-  // ---- Adatok betöltése és Trade Figyelés ----
+  // ---- Adatok betöltése és Trade Naplózás ----
   const loadBots = useCallback(async () => {
     setIsSyncing(true)
     try {
@@ -89,23 +95,30 @@ export default function BotsPage() {
         })
       )
 
-      // TRADE FIGYELŐ LOGIKA:
+      // ÚJ TRADE ÉSZLELÉSE ÉS KÁRTYA-LOG FRISSÍTÉSE
       if (prevBotsRef.current.length > 0) {
-        withPortfolio.forEach(newBot => {
+        withPortfolio.forEach((newBot, index) => {
           const oldBot = prevBotsRef.current.find(b => b.id === newBot.id)
-          if (oldBot && oldBot.portfolio && newBot.portfolio) {
-            // Ha nőtt a trade-ek száma
+          if (oldBot?.portfolio && newBot.portfolio) {
             if (newBot.portfolio.total_trades > oldBot.portfolio.total_trades) {
               const pnlDiff = newBot.portfolio.total_pnl - oldBot.portfolio.total_pnl
-              const type = pnlDiff >= 0 ? 'success' : 'warn'
-              addLog(
-                `${newBot.name}: Új trade lezárva! (${pnlDiff >= 0 ? '+' : ''}$${pnlDiff.toFixed(2)})`,
-                type
-              )
-            }
-            // Ha megváltozott a státusz (pl. hiba történt)
-            if (newBot.status === 'error' && oldBot.status !== 'error') {
-              addLog(`${newBot.name}: Kritikus hiba történt a kereskedés során!`, 'error')
+              const isWin = pnlDiff >= 0
+
+              // Hozzáadjuk a bot saját history-jához a memóriában
+              const newTrade: TradeResult = {
+                id: Math.random().toString(),
+                win: isWin,
+                amount: Math.abs(pnlDiff),
+                time: new Date().toLocaleTimeString()
+              }
+
+              // Megkeressük és frissítjük a konkrét botot a listában a history-val
+              newBot.history = [newTrade, ...(oldBot.history || [])].slice(0, 5)
+
+              addLog(`${newBot.name}: ${isWin ? 'NYERTES' : 'VESZTES'} trade lezárva! ($${newTrade.amount.toFixed(2)})`, isWin ? 'success' : 'warn')
+            } else {
+              // Megtartjuk a meglévő history-t a frissítés után is
+              newBot.history = oldBot.history
             }
           }
         })
@@ -125,10 +138,9 @@ export default function BotsPage() {
   useEffect(() => {
     setMounted(true)
     loadBots()
-    addLog("Rendszer szinkronizálva, botok figyelése aktív.", "info")
-    const interval = setInterval(loadBots, 15000) // 15 mp-re vettem a frissítést
+    const interval = setInterval(loadBots, 15000)
     return () => clearInterval(interval)
-  }, [loadBots, addLog])
+  }, [loadBots])
 
   // ---- Műveletek ----
   const handleStart = async (id: string, name: string) => {
@@ -136,7 +148,7 @@ export default function BotsPage() {
     try {
       await apiFetch(`/bots/${id}/start`, { method: "POST" })
       toast.success(`${name} elindítva`)
-      addLog(`${name}: Kézi indítás sikeres.`, "success")
+      addLog(`${name}: Kézi indítás.`, "success")
       await loadBots()
     } catch (err: any) { toast.error(err.message) }
     finally { setActionLoading(null) }
@@ -159,22 +171,12 @@ export default function BotsPage() {
     try {
       await apiFetch(`/bots/${id}/reset`, { method: "POST" })
       toast.success("Nullázva")
-      addLog(`${name}: Statisztikák manuálisan nullázva.`, "info")
+      addLog(`${name}: Statisztikák nullázva.`, "info")
+      // Ürítjük a history-t is
+      setBots(prev => prev.map(b => b.id === id ? { ...b, history: [] } : b))
       await loadBots()
     } catch { toast.error("Backend hiba") }
     finally { setActionLoading(null) }
-  }
-
-  const handleBulkAction = async (action: 'start' | 'stop') => {
-    const targets = bots.filter(b => action === 'start' ? b.status !== 'running' : b.status === 'running')
-    if (targets.length === 0) return
-    toast.promise(Promise.all(targets.map(b => apiFetch(`/bots/${b.id}/${action}`, { method: "POST" }))), {
-      loading: "Művelet folyamatban...",
-      success: "Összes bot frissítve!",
-      error: "Hiba történt"
-    })
-    addLog(`Csoportos művelet: Minden bot ${action === 'start' ? 'indítása' : 'leállítása'}.`, "info")
-    setTimeout(loadBots, 2000)
   }
 
   const filteredBots = useMemo(() => {
@@ -221,9 +223,6 @@ export default function BotsPage() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: '10px' }}>
-          <button onClick={() => { if (confirm("Összes statisztika nullázása?")) handleBulkAction('stop') }} style={{ padding: '10px 15px', background: '#1a1a2e', border: '1px solid #252535', borderRadius: '10px', color: '#e2e8f0', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <RotateCcw size={14} /> Összes reset
-          </button>
           <button style={{ padding: '10px 20px', background: '#3b3bff', border: 'none', borderRadius: '10px', color: '#fff', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>+ Új bot</button>
         </div>
       </div>
@@ -244,40 +243,23 @@ export default function BotsPage() {
         </div>
       </div>
 
-      {/* 3. SZŰRŐ SÁV */}
+      {/* 3. SZŰRŐK ÉS RENDEZÉS */}
       <div style={{ display: 'flex', gap: '12px', marginBottom: '20px', alignItems: 'center', flexWrap: 'wrap' }}>
         <div style={{ position: 'relative', flex: 1, minWidth: '200px' }}>
           <Search size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: '#4b5563' }} />
           <input type="text" placeholder="Keresés..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: '100%', padding: '10px 10px 10px 38px', background: '#13131f', border: '1px solid #252535', borderRadius: '10px', color: '#fff', outline: 'none', fontSize: '13px' }} />
         </div>
-
-        <div style={{ display: 'flex', background: '#13131f', padding: '3px', borderRadius: '10px', border: '1px solid #252535' }}>
-          {(['all', 'running', 'stopped', 'error'] as const).map(f => (
-            <button key={f} onClick={() => setStatusFilter(f)} style={{ padding: '7px 14px', fontSize: '12px', borderRadius: '8px', border: 'none', background: statusFilter === f ? '#3b3bff20' : 'transparent', color: statusFilter === f ? '#818cf8' : '#4b5563', cursor: 'pointer' }}>
-              {f === 'all' ? 'Összes' : f === 'running' ? '● Aktív' : f === 'stopped' ? '■ Leállítva' : '✕ Hiba'}
-            </button>
-          ))}
-        </div>
-
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <select value={sortKey} onChange={e => setSortKey(e.target.value as SortKey)} style={{ background: '#13131f', color: '#fff', border: '1px solid #252535', padding: '10px 15px', borderRadius: '10px', outline: 'none', fontSize: '13px', cursor: 'pointer' }}>
-            <option value="pnl">Legtöbb profit</option>
-            <option value="winRate">Win Rate</option>
-            <option value="trades">Trade szám</option>
-            <option value="balance">Egyenleg</option>
-            <option value="name">Név</option>
-          </select>
-          <button onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')} style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '10px', padding: '10px', color: '#4b5563', cursor: 'pointer' }}>
-            <ArrowUpDown size={16} />
-          </button>
-        </div>
+        <select value={sortKey} onChange={e => setSortKey(e.target.value as SortKey)} style={{ background: '#13131f', color: '#fff', border: '1px solid #252535', padding: '10px 15px', borderRadius: '10px', outline: 'none', fontSize: '13px', cursor: 'pointer' }}>
+          <option value="pnl">Legtöbb profit</option>
+          <option value="winRate">Win Rate</option>
+          <option value="balance">Egyenleg</option>
+          <option value="name">Név</option>
+        </select>
+        <button onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')} style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '10px', padding: '10px', color: '#4b5563', cursor: 'pointer' }}><ArrowUpDown size={16} /></button>
       </div>
 
       {/* 4. GYORS SZŰRŐK */}
       <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', alignItems: 'center', flexWrap: 'wrap' }}>
-        <button onClick={() => handleBulkAction('start')} style={{ padding: '8px 15px', background: '#22c55e15', color: '#22c55e', border: '1px solid #22c55e30', borderRadius: '8px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>▶ Indít mind</button>
-        <button onClick={() => handleBulkAction('stop')} style={{ padding: '8px 15px', background: '#fbbf2415', color: '#fbbf24', border: '1px solid #fbbf2430', borderRadius: '8px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>■ Megállít mind</button>
-        <div style={{ width: '1px', height: '18px', background: '#252535', margin: '0 5px' }} />
         <button onClick={() => setQuickFilter(quickFilter === 'best3' ? 'none' : 'best3')} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 15px', borderRadius: '8px', border: '1px solid #252535', background: quickFilter === 'best3' ? '#fbbf2415' : '#13131f', color: quickFilter === 'best3' ? '#fbbf24' : '#6b7280', fontSize: '12px', cursor: 'pointer' }}><Trophy size={14} /> Top 3 Legjobb</button>
         <button onClick={() => setQuickFilter(quickFilter === 'worst3' ? 'none' : 'worst3')} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 15px', borderRadius: '8px', border: '1px solid #252535', background: quickFilter === 'worst3' ? '#ef444415' : '#13131f', color: quickFilter === 'worst3' ? '#ef4444' : '#6b7280', fontSize: '12px', cursor: 'pointer' }}><AlertTriangle size={14} /> Top 3 Legrosszabb</button>
       </div>
@@ -292,34 +274,29 @@ export default function BotsPage() {
             onStart={() => handleStart(bot.id, bot.name)}
             onStop={() => handleStop(bot.id, bot.name)}
             onReset={() => handleReset(bot.id, bot.name)}
-            onDelete={() => { if (confirm("Törlöd?")) apiFetch(`/bots/${bot.id}`, { method: "DELETE" }).then(loadBots) }}
+            onDelete={() => apiFetch(`/bots/${bot.id}`, { method: "DELETE" }).then(loadBots)}
           />
         ))}
       </div>
 
-      {/* 6. ACTIVITY LOG (ÉLŐ NAPLÓ) */}
+      {/* 6. GLOBAL ACTIVITY LOG */}
       <div style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '16px', padding: '18px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '15px', color: '#6366f1' }}>
           <ScrollText size={18} />
           <h2 style={{ fontSize: '14px', fontWeight: 700, margin: 0, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Eseménynapló</h2>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '200px', overflowY: 'auto', paddingRight: '10px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '180px', overflowY: 'auto' }}>
           {logs.map(log => (
             <div key={log.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', padding: '8px 12px', background: '#0b0b14', borderRadius: '8px', borderLeft: `3px solid ${log.type === 'success' ? '#22c55e' : log.type === 'warn' ? '#fbbf24' : '#6366f1'}` }}>
-              <span style={{ color: '#e2e8f0' }}>{log.msg}</span>
-              <span style={{ color: '#4b5563', fontSize: '10px' }}>{log.time}</span>
+              <span>{log.msg}</span>
+              <span style={{ color: '#4b5563' }}>{log.time}</span>
             </div>
           ))}
-          {logs.length === 0 && <p style={{ fontSize: '12px', color: '#4b5563', textAlign: 'center' }}>Nincs rögzített esemény.</p>}
         </div>
       </div>
 
-      {/* Status Footer */}
       <div style={{ marginTop: '20px', display: 'flex', alignItems: 'center', gap: '10px', fontSize: '11px', color: '#4b5563' }}>
         {serverOnline ? <Wifi size={14} color="#22c55e" /> : <WifiOff size={14} color="#ef4444" />}
-        <span>Status: {serverOnline ? 'ONLINE' : 'OFFLINE'}</span>
-        <span style={{ margin: '0 5px' }}>•</span>
-        <Clock size={12} />
         <span>Frissítve: {lastSync.toLocaleTimeString()}</span>
         {isSyncing && <Loader2 size={12} className="animate-spin" />}
       </div>
@@ -344,7 +321,8 @@ function BotCard({ bot, onStart, onStop, onReset, onDelete, isLoading }: { bot: 
   const strategyColor = STRATEGY_COLORS[bot.strategy_type] || '#818cf8'
 
   return (
-    <motion.div layout initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '16px', padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+    <motion.div layout style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '16px', padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+      {/* Fejléc */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ overflow: 'hidden' }}>
           <h3 style={{ fontSize: '14px', fontWeight: 700, margin: 0, whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{bot.name}</h3>
@@ -353,7 +331,8 @@ function BotCard({ bot, onStart, onStop, onReset, onDelete, isLoading }: { bot: 
         <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: bot.status === 'running' ? '#22c55e' : '#4b5563', boxShadow: bot.status === 'running' ? '0 0 10px #22c55e' : 'none' }} />
       </div>
 
-      <div style={{ background: '#0d0d1a', padding: '12px', borderRadius: '12px', border: '1px solid #1e1e30' }}>
+      {/* Egyenleg és Profit */}
+      <div style={{ background: '#0d0d1a', padding: '10px', borderRadius: '12px', border: '1px solid #1e1e30' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
             <Wallet size={12} color="#6366f1" />
@@ -364,39 +343,54 @@ function BotCard({ bot, onStart, onStop, onReset, onDelete, isLoading }: { bot: 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
             <TrendingUp size={12} color={pnl >= 0 ? '#4ade80' : '#f87171'} />
-            <span style={{ fontSize: '9px', color: '#4b5563', fontWeight: 600 }}>PROFIT</span>
+            <span style={{ fontSize: '9px', color: '#4b5563', fontWeight: 600 }}>PnL</span>
           </div>
           <span style={{ fontSize: '15px', fontWeight: 800, color: pnl >= 0 ? '#4ade80' : '#f87171' }}>{pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</span>
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '5px' }}>
-        <div style={{ background: '#1a1a2e', padding: '6px', borderRadius: '8px', textAlign: 'center', border: '1px solid #252535' }}>
-          <p style={{ fontSize: '8px', color: '#4b5563', margin: '0 0 2px' }}>TÉT</p>
-          <p style={{ fontSize: '11px', fontWeight: 700, margin: 0 }}>${bot.bet_size}</p>
+      {/* Config & Win Rate */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '5px' }}>
+        <div style={{ background: '#1a1a2e', padding: '5px', borderRadius: '8px', textAlign: 'center' }}>
+          <p style={{ fontSize: '7px', color: '#4b5563', margin: 0 }}>TÉT</p>
+          <p style={{ fontSize: '10px', fontWeight: 700, margin: 0 }}>${bot.bet_size}</p>
         </div>
-        <div style={{ background: '#ef444408', padding: '6px', borderRadius: '8px', textAlign: 'center', border: '1px solid #ef444420' }}>
-          <p style={{ fontSize: '8px', color: '#ef4444', margin: '0 0 2px' }}>SL</p>
-          <p style={{ fontSize: '11px', fontWeight: 700, margin: 0, color: '#ef4444' }}>-{(bot.stop_loss * 100).toFixed(0)}%</p>
+        <div style={{ background: '#1a1a2e', padding: '5px', borderRadius: '8px', textAlign: 'center' }}>
+          <p style={{ fontSize: '7px', color: '#ef4444', margin: 0 }}>SL</p>
+          <p style={{ fontSize: '10px', fontWeight: 700, margin: 0 }}>-{(bot.stop_loss * 100).toFixed(0)}%</p>
         </div>
-        <div style={{ background: '#22c55e08', padding: '6px', borderRadius: '8px', textAlign: 'center', border: '1px solid #22c55e20' }}>
-          <p style={{ fontSize: '8px', color: '#22c55e', margin: '0 0 2px' }}>TP</p>
-          <p style={{ fontSize: '11px', fontWeight: 700, margin: 0, color: '#22c55e' }}>+{(bot.take_profit * 100).toFixed(0)}%</p>
+        <div style={{ background: '#1a1a2e', padding: '5px', borderRadius: '8px', textAlign: 'center' }}>
+          <p style={{ fontSize: '7px', color: '#22c55e', margin: 0 }}>TP</p>
+          <p style={{ fontSize: '10px', fontWeight: 700, margin: 0 }}>+{(bot.take_profit * 100).toFixed(0)}%</p>
         </div>
       </div>
 
-      <div style={{ marginTop: '5px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', fontWeight: 800, marginBottom: '4px' }}>
-          <span style={{ color: '#4ade80' }}>{wins}W</span>
-          <span style={{ color: '#6366f1' }}>{(bot.portfolio?.win_rate || 0).toFixed(1)}%</span>
-          <span style={{ color: '#f87171' }}>{losses}L</span>
+      {/* BOT LOG ABLAK - ÚJ: Utolsó 5 kötés */}
+      <div style={{ background: '#080812', borderRadius: '10px', padding: '8px', border: '1px solid #1a1a2e' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '5px' }}>
+          <History size={10} color="#4b5563" />
+          <span style={{ fontSize: '9px', fontWeight: 700, color: '#4b5563' }}>UTÓBBI KÖTÉSEK ({wins}W / {losses}L)</span>
         </div>
-        <div style={{ height: '4px', background: '#1e1e30', borderRadius: '2px', overflow: 'hidden' }}>
-          <div style={{ height: '100%', width: `${bot.portfolio?.win_rate || 0}%`, background: '#22c55e', transition: 'width 1s ease' }} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', height: '65px', overflowY: 'auto' }}>
+          {bot.history && bot.history.length > 0 ? (
+            bot.history.map(t => (
+              <div key={t.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', background: '#13131f', padding: '3px 6px', borderRadius: '4px' }}>
+                <span style={{ color: t.win ? '#22c55e' : '#ef4444', fontWeight: 800 }}>{t.win ? '✅ NYERT' : '❌ VESZTETT'}</span>
+                <span style={{ fontWeight: 700 }}>${t.amount.toFixed(2)}</span>
+              </div>
+            ))
+          ) : (
+            <p style={{ fontSize: '8px', color: '#333', textAlign: 'center', marginTop: '15px' }}>Még nincs kötés...</p>
+          )}
         </div>
-        <p style={{ fontSize: '8px', color: '#4b5563', textAlign: 'center', marginTop: '4px' }}>Összes trade: {bot.portfolio?.total_trades || 0}</p>
       </div>
 
+      {/* Win Rate Bar */}
+      <div style={{ height: '4px', background: '#1e1e30', borderRadius: '2px', overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${bot.portfolio?.win_rate || 0}%`, background: '#22c55e', transition: 'width 1s ease' }} />
+      </div>
+
+      {/* Gombok */}
       <div style={{ display: 'flex', gap: '5px', marginTop: '5px' }}>
         {bot.status === 'running' ? (
           <button onClick={onStop} disabled={isLoading} style={{ flex: 3, padding: '10px', background: '#fbbf2415', color: '#fbbf24', border: '1px solid #fbbf2430', borderRadius: '10px', cursor: 'pointer', fontSize: '11px', fontWeight: 800 }}>
@@ -407,12 +401,8 @@ function BotCard({ bot, onStart, onStop, onReset, onDelete, isLoading }: { bot: 
             {isLoading ? <Loader2 size={14} className="animate-spin" /> : 'INDÍTÁS'}
           </button>
         )}
-        <button onClick={onReset} disabled={isLoading} style={{ flex: 1, padding: '10px', background: '#3b3bff15', color: '#818cf8', border: '1px solid #3b3bff30', borderRadius: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <RotateCcw size={16} />
-        </button>
-        <button onClick={onDelete} style={{ flex: 1, padding: '10px', background: '#ef444415', color: '#ef4444', border: '1px solid #ef444430', borderRadius: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <Trash2 size={16} />
-        </button>
+        <button onClick={onReset} disabled={isLoading} style={{ flex: 1, padding: '10px', background: '#3b3bff15', color: '#818cf8', border: '1px solid #3b3bff30', borderRadius: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><RotateCcw size={16} /></button>
+        <button onClick={onDelete} style={{ flex: 1, padding: '10px', background: '#ef444415', color: '#ef4444', border: '1px solid #ef444430', borderRadius: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Trash2 size={16} /></button>
       </div>
     </motion.div>
   )

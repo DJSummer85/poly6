@@ -32,7 +32,7 @@ interface Bot {
   stop_loss: number
   take_profit: number
   market_id: string
-  history?: TradeResult[] // ÚJ: Egyedi trade napló a botnak
+  history?: TradeResult[]
   portfolio?: {
     balance: number
     total_pnl: number
@@ -81,7 +81,7 @@ export default function BotsPage() {
     setLogs(prev => [newEntry, ...prev].slice(0, 20))
   }, [])
 
-  // ---- Adatok betöltése és Trade Naplózás ----
+  // ---- Adatbetöltés és Trade Naplózás ----
   const loadBots = useCallback(async () => {
     setIsSyncing(true)
     try {
@@ -95,29 +95,22 @@ export default function BotsPage() {
         })
       )
 
-      // ÚJ TRADE ÉSZLELÉSE ÉS KÁRTYA-LOG FRISSÍTÉSE
       if (prevBotsRef.current.length > 0) {
-        withPortfolio.forEach((newBot, index) => {
+        withPortfolio.forEach((newBot) => {
           const oldBot = prevBotsRef.current.find(b => b.id === newBot.id)
           if (oldBot?.portfolio && newBot.portfolio) {
             if (newBot.portfolio.total_trades > oldBot.portfolio.total_trades) {
               const pnlDiff = newBot.portfolio.total_pnl - oldBot.portfolio.total_pnl
               const isWin = pnlDiff >= 0
-
-              // Hozzáadjuk a bot saját history-jához a memóriában
               const newTrade: TradeResult = {
                 id: Math.random().toString(),
                 win: isWin,
                 amount: Math.abs(pnlDiff),
                 time: new Date().toLocaleTimeString()
               }
-
-              // Megkeressük és frissítjük a konkrét botot a listában a history-val
-              newBot.history = [newTrade, ...(oldBot.history || [])].slice(0, 5)
-
-              addLog(`${newBot.name}: ${isWin ? 'NYERTES' : 'VESZTES'} trade lezárva! ($${newTrade.amount.toFixed(2)})`, isWin ? 'success' : 'warn')
+              newBot.history = [newTrade, ...(oldBot.history || [])].slice(0, 100)
+              addLog(`${newBot.name}: ${isWin ? 'NYERTES' : 'VESZTES'} trade ($${newTrade.amount.toFixed(2)})`, isWin ? 'success' : 'warn')
             } else {
-              // Megtartjuk a meglévő history-t a frissítés után is
               newBot.history = oldBot.history
             }
           }
@@ -148,7 +141,7 @@ export default function BotsPage() {
     try {
       await apiFetch(`/bots/${id}/start`, { method: "POST" })
       toast.success(`${name} elindítva`)
-      addLog(`${name}: Kézi indítás.`, "success")
+      addLog(`${name}: Elindítva.`, "success")
       await loadBots()
     } catch (err: any) { toast.error(err.message) }
     finally { setActionLoading(null) }
@@ -159,7 +152,7 @@ export default function BotsPage() {
     try {
       await apiFetch(`/bots/${id}/stop`, { method: "POST" })
       toast.success(`${name} leállítva`)
-      addLog(`${name}: Kézi leállítás.`, "warn")
+      addLog(`${name}: Leállítva.`, "warn")
       await loadBots()
     } catch (err: any) { toast.error(err.message) }
     finally { setActionLoading(null) }
@@ -172,11 +165,34 @@ export default function BotsPage() {
       await apiFetch(`/bots/${id}/reset`, { method: "POST" })
       toast.success("Nullázva")
       addLog(`${name}: Statisztikák nullázva.`, "info")
-      // Ürítjük a history-t is
       setBots(prev => prev.map(b => b.id === id ? { ...b, history: [] } : b))
       await loadBots()
     } catch { toast.error("Backend hiba") }
     finally { setActionLoading(null) }
+  }
+
+  // ÖSSZES RESETELÉSE FUNKCIÓ
+  const handleResetAll = async () => {
+    if (!confirm("BIZTOSAN nullázni akarod az ÖSSZES bot statisztikáját és egyenlegét?")) return
+    addLog("Összes bot nullázása folyamatban...", "warn")
+    try {
+      await Promise.all(bots.map(bot => apiFetch(`/bots/${bot.id}/reset`, { method: "POST" })))
+      toast.success("Minden bot nullázva!")
+      setBots(prev => prev.map(b => ({ ...b, history: [] })))
+      await loadBots()
+    } catch { toast.error("Hiba történt a tömeges reset során") }
+  }
+
+  const handleBulkAction = async (action: 'start' | 'stop') => {
+    const targets = bots.filter(b => action === 'start' ? b.status !== 'running' : b.status === 'running')
+    if (targets.length === 0) return
+    toast.promise(Promise.all(targets.map(b => apiFetch(`/bots/${b.id}/${action}`, { method: "POST" }))), {
+      loading: "Művelet folyamatban...",
+      success: "Kész!",
+      error: "Hiba történt"
+    })
+    addLog(`Minden bot ${action === 'start' ? 'indítása' : 'leállítása'}.`, "info")
+    setTimeout(loadBots, 2000)
   }
 
   const filteredBots = useMemo(() => {
@@ -222,15 +238,13 @@ export default function BotsPage() {
             <p style={{ color: '#4b5563', fontSize: '13px', margin: 0 }}>Advanced Bot Management</p>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '10px' }}>
-          <button style={{ padding: '10px 20px', background: '#3b3bff', border: 'none', borderRadius: '10px', color: '#fff', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>+ Új bot</button>
-        </div>
+        <button style={{ padding: '10px 20px', background: '#3b3bff', border: 'none', borderRadius: '10px', color: '#fff', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>+ Új bot</button>
       </div>
 
-      {/* 2. STATISZTIKAI KÁRTYÁK */}
+      {/* 2. STATISZTIKÁK */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '12px', marginBottom: '25px' }}>
         <SummaryCard label="Aktív botok" value={totalStats.active} color="#a3e635" />
-        <SummaryCard label="Teljes PnL" value={`$${totalStats.pnl.toFixed(2)}`} color={totalStats.pnl >= 0 ? "#4ade80" : "#f87171"} />
+        <SummaryCard label="Összes PnL" value={`$${totalStats.pnl.toFixed(2)}`} color={totalStats.pnl >= 0 ? "#4ade80" : "#f87171"} />
         <SummaryCard label="Összes Trade" value={totalStats.trades} color="#e2e8f0" />
         <SummaryCard label="Egyenleg Sum" value={`$${totalStats.balance.toFixed(2)}`} color="#6366f1" />
         <div style={{ background: '#13131f', padding: '15px', borderRadius: '12px', border: '1px solid #252535' }}>
@@ -243,25 +257,52 @@ export default function BotsPage() {
         </div>
       </div>
 
-      {/* 3. SZŰRŐK ÉS RENDEZÉS */}
+      {/* 3. SZŰRŐ ÉS RENDEZŐ */}
       <div style={{ display: 'flex', gap: '12px', marginBottom: '20px', alignItems: 'center', flexWrap: 'wrap' }}>
         <div style={{ position: 'relative', flex: 1, minWidth: '200px' }}>
           <Search size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: '#4b5563' }} />
-          <input type="text" placeholder="Keresés..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: '100%', padding: '10px 10px 10px 38px', background: '#13131f', border: '1px solid #252535', borderRadius: '10px', color: '#fff', outline: 'none', fontSize: '13px' }} />
+          <input type="text" placeholder="Bot keresése..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: '100%', padding: '10px 10px 10px 38px', background: '#13131f', border: '1px solid #252535', borderRadius: '10px', color: '#fff', outline: 'none', fontSize: '13px' }} />
         </div>
-        <select value={sortKey} onChange={e => setSortKey(e.target.value as SortKey)} style={{ background: '#13131f', color: '#fff', border: '1px solid #252535', padding: '10px 15px', borderRadius: '10px', outline: 'none', fontSize: '13px', cursor: 'pointer' }}>
-          <option value="pnl">Legtöbb profit</option>
-          <option value="winRate">Win Rate</option>
-          <option value="balance">Egyenleg</option>
-          <option value="name">Név</option>
-        </select>
-        <button onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')} style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '10px', padding: '10px', color: '#4b5563', cursor: 'pointer' }}><ArrowUpDown size={16} /></button>
+
+        <div style={{ display: 'flex', background: '#13131f', padding: '3px', borderRadius: '10px', border: '1px solid #252535' }}>
+          {(['all', 'running', 'stopped', 'error'] as const).map(f => (
+            <button key={f} onClick={() => setStatusFilter(f)} style={{ padding: '7px 14px', fontSize: '12px', borderRadius: '8px', border: 'none', background: statusFilter === f ? '#3b3bff20' : 'transparent', color: statusFilter === f ? '#818cf8' : '#4b5563', cursor: 'pointer' }}>
+              {f === 'all' ? 'Összes' : f === 'running' ? '● Aktív' : f === 'stopped' ? '■ Leállítva' : '✕ Hiba'}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <select value={sortKey} onChange={e => setSortKey(e.target.value as SortKey)} style={{ background: '#13131f', color: '#fff', border: '1px solid #252535', padding: '10px 15px', borderRadius: '10px', outline: 'none', fontSize: '13px', cursor: 'pointer' }}>
+            <option value="pnl">Profit</option>
+            <option value="winRate">Win Rate</option>
+            <option value="balance">Egyenleg</option>
+            <option value="name">Név</option>
+          </select>
+          <button onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')} style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '10px', padding: '10px', color: '#4b5563', cursor: 'pointer' }}><ArrowUpDown size={16} /></button>
+        </div>
       </div>
 
-      {/* 4. GYORS SZŰRŐK */}
+      {/* 4. GYORS MŰVELETEK (Reset All Gombbal) */}
       <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', alignItems: 'center', flexWrap: 'wrap' }}>
-        <button onClick={() => setQuickFilter(quickFilter === 'best3' ? 'none' : 'best3')} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 15px', borderRadius: '8px', border: '1px solid #252535', background: quickFilter === 'best3' ? '#fbbf2415' : '#13131f', color: quickFilter === 'best3' ? '#fbbf24' : '#6b7280', fontSize: '12px', cursor: 'pointer' }}><Trophy size={14} /> Top 3 Legjobb</button>
-        <button onClick={() => setQuickFilter(quickFilter === 'worst3' ? 'none' : 'worst3')} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 15px', borderRadius: '8px', border: '1px solid #252535', background: quickFilter === 'worst3' ? '#ef444415' : '#13131f', color: quickFilter === 'worst3' ? '#ef4444' : '#6b7280', fontSize: '12px', cursor: 'pointer' }}><AlertTriangle size={14} /> Top 3 Legrosszabb</button>
+        <button onClick={() => handleBulkAction('start')} style={{ padding: '8px 15px', background: '#22c55e15', color: '#22c55e', border: '1px solid #22c55e30', borderRadius: '8px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>▶ Indít mind</button>
+        <button onClick={() => handleBulkAction('stop')} style={{ padding: '8px 15px', background: '#fbbf2415', color: '#fbbf24', border: '1px solid #fbbf2430', borderRadius: '8px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>■ Megállít mind</button>
+
+        <div style={{ width: '1px', height: '18px', background: '#252535', margin: '0 5px' }} />
+
+        <button onClick={() => setQuickFilter(quickFilter === 'best3' ? 'none' : 'best3')} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 15px', borderRadius: '8px', border: '1px solid #252535', background: quickFilter === 'best3' ? '#fbbf2415' : '#13131f', color: quickFilter === 'best3' ? '#fbbf24' : '#6b7280', fontSize: '12px', cursor: 'pointer' }}>
+          <Trophy size={14} /> Top 3 Legjobb
+        </button>
+        <button onClick={() => setQuickFilter(quickFilter === 'worst3' ? 'none' : 'worst3')} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 15px', borderRadius: '8px', border: '1px solid #252535', background: quickFilter === 'worst3' ? '#ef444415' : '#13131f', color: quickFilter === 'worst3' ? '#ef4444' : '#6b7280', fontSize: '12px', cursor: 'pointer' }}>
+          <AlertTriangle size={14} /> Top 3 Legrosszabb
+        </button>
+
+        <div style={{ width: '1px', height: '18px', background: '#252535', margin: '0 5px' }} />
+
+        {/* --- ÚJ: ÖSSZES RESETELÉSE GOMB --- */}
+        <button onClick={handleResetAll} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 15px', borderRadius: '8px', border: '1px solid #3b3bff40', background: '#3b3bff15', color: '#818cf8', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>
+          <RotateCcw size={14} /> Összes statisztika nullázása
+        </button>
       </div>
 
       {/* 5. BOT RÁCS */}
@@ -274,12 +315,12 @@ export default function BotsPage() {
             onStart={() => handleStart(bot.id, bot.name)}
             onStop={() => handleStop(bot.id, bot.name)}
             onReset={() => handleReset(bot.id, bot.name)}
-            onDelete={() => apiFetch(`/bots/${bot.id}`, { method: "DELETE" }).then(loadBots)}
+            onDelete={() => { if (confirm("Végleges törlés?")) apiFetch(`/bots/${bot.id}`, { method: "DELETE" }).then(loadBots) }}
           />
         ))}
       </div>
 
-      {/* 6. GLOBAL ACTIVITY LOG */}
+      {/* 6. GLOBAL LOG */}
       <div style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '16px', padding: '18px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '15px', color: '#6366f1' }}>
           <ScrollText size={18} />
@@ -297,6 +338,8 @@ export default function BotsPage() {
 
       <div style={{ marginTop: '20px', display: 'flex', alignItems: 'center', gap: '10px', fontSize: '11px', color: '#4b5563' }}>
         {serverOnline ? <Wifi size={14} color="#22c55e" /> : <WifiOff size={14} color="#ef4444" />}
+        <span>Kapcsolat: {serverOnline ? 'ONLINE' : 'OFFLINE'}</span>
+        <span style={{ margin: '0 5px' }}>•</span>
         <span>Frissítve: {lastSync.toLocaleTimeString()}</span>
         {isSyncing && <Loader2 size={12} className="animate-spin" />}
       </div>
@@ -321,7 +364,7 @@ function BotCard({ bot, onStart, onStop, onReset, onDelete, isLoading }: { bot: 
   const strategyColor = STRATEGY_COLORS[bot.strategy_type] || '#818cf8'
 
   return (
-    <motion.div layout style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '16px', padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+    <motion.div layout initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '16px', padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
       {/* Fejléc */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ overflow: 'hidden' }}>
@@ -331,7 +374,7 @@ function BotCard({ bot, onStart, onStop, onReset, onDelete, isLoading }: { bot: 
         <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: bot.status === 'running' ? '#22c55e' : '#4b5563', boxShadow: bot.status === 'running' ? '0 0 10px #22c55e' : 'none' }} />
       </div>
 
-      {/* Egyenleg és Profit */}
+      {/* Értékek */}
       <div style={{ background: '#0d0d1a', padding: '10px', borderRadius: '12px', border: '1px solid #1e1e30' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
@@ -349,8 +392,8 @@ function BotCard({ bot, onStart, onStop, onReset, onDelete, isLoading }: { bot: 
         </div>
       </div>
 
-      {/* Config & Win Rate */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '5px' }}>
+      {/* Config rács */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '5px' }}>
         <div style={{ background: '#1a1a2e', padding: '5px', borderRadius: '8px', textAlign: 'center' }}>
           <p style={{ fontSize: '7px', color: '#4b5563', margin: 0 }}>TÉT</p>
           <p style={{ fontSize: '10px', fontWeight: 700, margin: 0 }}>${bot.bet_size}</p>
@@ -365,13 +408,13 @@ function BotCard({ bot, onStart, onStop, onReset, onDelete, isLoading }: { bot: 
         </div>
       </div>
 
-      {/* BOT LOG ABLAK - ÚJ: Utolsó 5 kötés */}
+      {/* Bot Log Ablak */}
       <div style={{ background: '#080812', borderRadius: '10px', padding: '8px', border: '1px solid #1a1a2e' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '5px' }}>
           <History size={10} color="#4b5563" />
           <span style={{ fontSize: '9px', fontWeight: 700, color: '#4b5563' }}>UTÓBBI KÖTÉSEK ({wins}W / {losses}L)</span>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', height: '65px', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', height: '60px', overflowY: 'auto' }}>
           {bot.history && bot.history.length > 0 ? (
             bot.history.map(t => (
               <div key={t.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', background: '#13131f', padding: '3px 6px', borderRadius: '4px' }}>
@@ -401,8 +444,12 @@ function BotCard({ bot, onStart, onStop, onReset, onDelete, isLoading }: { bot: 
             {isLoading ? <Loader2 size={14} className="animate-spin" /> : 'INDÍTÁS'}
           </button>
         )}
-        <button onClick={onReset} disabled={isLoading} style={{ flex: 1, padding: '10px', background: '#3b3bff15', color: '#818cf8', border: '1px solid #3b3bff30', borderRadius: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><RotateCcw size={16} /></button>
-        <button onClick={onDelete} style={{ flex: 1, padding: '10px', background: '#ef444415', color: '#ef4444', border: '1px solid #ef444430', borderRadius: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Trash2 size={16} /></button>
+        <button onClick={onReset} disabled={isLoading} title="Reset Stat" style={{ flex: 1, padding: '10px', background: '#3b3bff15', color: '#818cf8', border: '1px solid #3b3bff30', borderRadius: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <RotateCcw size={16} />
+        </button>
+        <button onClick={onDelete} style={{ flex: 1, padding: '10px', background: '#ef444415', color: '#ef4444', border: '1px solid #ef444430', borderRadius: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Trash2 size={16} />
+        </button>
       </div>
     </motion.div>
   )

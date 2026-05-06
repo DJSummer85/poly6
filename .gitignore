@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+frontend/.next/
+frontend/out/
+frontend/dist/
+backend/target/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+.env.balazs
+.env.bandi
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary files
+frontend/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Claude Code memory/logs
+.remember/
+.claude
+
+.playwright-mcp
+
+# Database
+*.db
+*.sqlite
+
+# Cache
+.cache/
+.eslintcache
+
+# Build artifacts
+*.tgz
+*.tsbuildinfo

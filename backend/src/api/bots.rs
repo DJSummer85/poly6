@@ -993,6 +993,59 @@ pub async fn stop_all_bots(
     })).into_response()
 }
 
+// ==================== Reset Endpoints ====================
+
+/// ÚJ: /bots/:id/reset — Statisztikák nullázása + egyenleg visszaállítása $100-ra
+/// Ez az endpoint a frontend "Összes statisztika nullázása" gombjához van megírva.
+pub async fn reset_bot(
+    Path((id,)): Path<(i64,)>,
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> Response {
+    let db = state.db();
+    let user_id = claims.user_id;
+
+    // Bot létezésének ellenőrzése
+    match queries::get_bot_by_id(&db, id, user_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(ErrorResponse {
+            error: "Bot not found".to_string(),
+        })).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to get bot for reset: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                error: "Failed to verify bot".to_string(),
+            })).into_response();
+        }
+    }
+
+    // Ha fut, leállítjuk
+    if state.orchestrator.is_running(id).await {
+        if let Err(e) = state.orchestrator.stop_bot(id, user_id).await {
+            tracing::warn!("Failed to stop bot {} before reset: {}", id, e);
+        }
+    }
+
+    // Portfolio nullázása, egyenleg visszaállítása $100-ra
+    match queries::reset_portfolio(&db, id, 100.0).await {
+        Ok(_) => {
+            tracing::info!("Bot {} reset to $100", id);
+            Json(serde_json::json!({
+                "success": true,
+                "message": "Bot statistics reset, balance restored to $100",
+                "new_balance": 100.0
+            })).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to reset portfolio for bot {}: {}", id, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                error: "Failed to reset bot statistics".to_string(),
+            })).into_response()
+        }
+    }
+}
+
+/// Régi reset-demo endpoint — megtartva visszafelé kompatibilitás miatt ($10-ra állít)
 pub async fn reset_demo_balance(
     Path((id,)): Path<(i64,)>,
     State(state): State<AppState>,

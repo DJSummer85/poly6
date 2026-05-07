@@ -110,6 +110,9 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/bots/:id/portfolio", get(bots::get_portfolio))
         .route("/bots/:id/history", get(bots::get_history))
         .route("/bots/:id/trades", get(bots::get_trades))
+        // ÚJ: /reset endpoint — statisztikák nullázása + egyenleg $100-ra
+        .route("/bots/:id/reset", post(bots::reset_bot))
+        // Régi reset-demo megtartva visszafelé kompatibilitás miatt
         .route("/bots/:id/reset-demo", post(bots::reset_demo_balance))
         .route("/bots/stop-all", post(bots::stop_all_bots))
         .route("/bots/run-all", post(bots::run_all_bots))

@@ -1,0 +1,2 @@
+INSERT OR REPLACE INTO settings (user_id, key_name, key_value) VALUES (1, 'proxy_address', '0xD6A2Ce0f9Cd03F231aF26FD968F74f776B1aAD33');
+INSERT OR REPLACE INTO settings (user_id, key_name, key_value) VALUES (1, 'wallet_address', '0xD6A2Ce0f9Cd03F231aF26FD968F74f776B1aAD33');

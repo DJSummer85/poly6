@@ -1,0 +1,14 @@
+# Build artifacts
+target/
+
+# Database files
+data/
+*.db
+*.sqlite
+
+# IDE
+.idea/
+
+# Environment
+.env
+.env.local

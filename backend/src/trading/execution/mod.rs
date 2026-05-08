@@ -2,3 +2,5 @@
 pub mod paper;
 pub mod live;
 
+pub use paper::PaperExecutionAdapter;
+pub use live::LiveExecutionAdapter;

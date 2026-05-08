@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use axum::http::StatusCode;
 
 use crate::api::AppState;
+use crate::db::Db;
+use crate::trading::bot_executor::strategies::MarketSnapshot;
 use crate::trading::execution::paper::{PaperExecutionAdapter, PaperTradeIntent};
 
 #[derive(Serialize)]

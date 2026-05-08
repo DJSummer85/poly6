@@ -465,15 +465,16 @@ pub async fn start_bot(
         })).into_response();
     }
 
-    // FIX: Demo/paper default balance $100 (was $10)
+    // Get initial balance and mode from request payload, or use defaults
     let requested_balance = payload
         .as_ref()
         .and_then(|p| p.initial_balance)
-        .unwrap_or(100.0);
+        .unwrap_or(10.0);
     let requested_mode = payload.as_ref().and_then(|p| p.mode.as_deref());
     let bot_mode = requested_mode.unwrap_or(&bot.trading_mode);
     let is_demo = normalize_mode(bot_mode) == "demo";
     let initial_balance = if is_demo {
+        // Demo mode: use requested balance (default $10) for simulation testing
         let paper_balance = requested_balance;
         tracing::info!("Bot {} running in demo mode — using simulated ${:.2} balance", id, paper_balance);
 
@@ -756,10 +757,11 @@ pub async fn get_portfolio(
     let db = state.db();
     let user_id = claims.user_id;
 
-    // FIX: Auto-create portfolio with $100 default balance (was $100, kept consistent)
+    // Auto-create portfolio with default balance if none exists (for bots that haven't been started yet)
     let portfolio = match queries::get_portfolio(&db, id, user_id).await {
         Ok(Some(p)) => p,
         Ok(None) => {
+            // Create a default paper portfolio for bots without one
             if let Err(e) = queries::ensure_portfolio(&db, id, user_id, 100.0).await {
                 tracing::error!("Failed to create portfolio for bot {}: {}", id, e);
                 return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
@@ -909,9 +911,8 @@ pub async fn run_all_bots(
                 }
 
                 let is_demo = normalize_mode(&bot.trading_mode) == "demo";
-                // FIX: Demo default balance $100 (was $100, kept consistent)
                 let balance_to_use = if is_demo {
-                    100.0
+                    100.0 // Default paper balance
                 } else {
                     wallet_balance
                 };
@@ -925,6 +926,7 @@ pub async fn run_all_bots(
                     continue;
                 }
 
+                // Ensure portfolio exists
                 match queries::get_portfolio(&db, bot.id, user_id).await {
                     Ok(None) => {
                         if let Err(e) = queries::ensure_portfolio(&db, bot.id, user_id, balance_to_use).await {
@@ -994,6 +996,7 @@ pub async fn stop_all_bots(
 // ==================== Reset Endpoints ====================
 
 /// ÚJ: /bots/:id/reset — Statisztikák nullázása + egyenleg visszaállítása $100-ra
+/// Ez az endpoint a frontend "Összes statisztika nullázása" gombjához van megírva.
 pub async fn reset_bot(
     Path((id,)): Path<(i64,)>,
     State(state): State<AppState>,
@@ -1051,6 +1054,7 @@ pub async fn reset_demo_balance(
     let db = state.db();
     let user_id = claims.user_id;
 
+    // Verify bot belongs to user
     match queries::get_bot_by_id(&db, id, user_id).await {
         Ok(Some(bot)) => {
             if normalize_mode(&bot.trading_mode) == "live" {
@@ -1070,14 +1074,14 @@ pub async fn reset_demo_balance(
         }
     }
 
-    // FIX: Reset portfolio to $100 (was $10)
-    match queries::reset_portfolio(&db, id, 100.0).await {
+    // Reset portfolio to $10
+    match queries::reset_portfolio(&db, id, 10.0).await {
         Ok(_) => {
-            tracing::info!("Demo bot {} reset to $100", id);
+            tracing::info!("Demo bot {} reset to $10", id);
             Json(serde_json::json!({
                 "success": true,
-                "message": "Demo balance reset to $100",
-                "new_balance": 100.0
+                "message": "Demo balance reset to $10",
+                "new_balance": 10.0
             })).into_response()
         }
         Err(e) => {
@@ -1185,7 +1189,6 @@ pub async fn get_aggregate_portfolio(
         }
     }
 }
-
 #[derive(Debug, Deserialize)]
 pub struct SetModeRequest {
     pub trading_mode: String,

@@ -14,10 +14,6 @@ pub mod volatility;
 pub mod sniper;
 pub mod oracle_lag;
 pub mod binance_velocity;
-pub mod edge_hunter;
-pub mod strict_momentum;
-pub mod patient_waiter;
-pub mod signal_momentum_v2;
 
 // Re-exports
 pub use base::{Strategy, StrategyDecision, Signal, StrategyParams};

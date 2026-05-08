@@ -1,8 +1,8 @@
 "use client";
 
-import { Gamepad2, Zap } from "lucide-react";
-import { apiFetch } from "@/lib/utils";
 import { useAppStore } from "@/store";
+import { apiFetch } from "@/lib/utils";
+import { toast } from "sonner";
 
 export function TradingModeToggle() {
   const { tradingMode, setTradingMode } = useAppStore();
@@ -24,31 +24,29 @@ export function TradingModeToggle() {
   };
 
   return (
-    <div className="flex items-center gap-1 rounded-full border border-white/10 bg-zinc-950/80 p-1 backdrop-blur-xl shadow-lg shadow-black/20">
+    <div className="fixed top-4 right-4 z-50 flex items-center gap-1 rounded-xl border border-white/10 bg-zinc-900/90 p-1 backdrop-blur-md shadow-lg">
       <button
         type="button"
-        aria-pressed={tradingMode === "demo"}
         onClick={() => handleModeChange("demo")}
-        className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all ${
+        className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all ${
           tradingMode === "demo"
-            ? "bg-indigo-500 text-white shadow-lg shadow-indigo-950/50"
+            ? "bg-indigo-500 text-white shadow"
             : "text-zinc-400 hover:text-zinc-200"
         }`}
       >
-        <Gamepad2 className="h-3.5 w-3.5" />
+        <span>🎮</span>
         Demo
       </button>
       <button
         type="button"
-        aria-pressed={tradingMode === "live"}
         onClick={() => handleModeChange("live")}
-        className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all ${
+        className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all ${
           tradingMode === "live"
-            ? "bg-emerald-500 text-white shadow-lg shadow-emerald-950/50"
+            ? "bg-green-500 text-white shadow"
             : "text-zinc-400 hover:text-zinc-200"
         }`}
       >
-        <Zap className="h-3.5 w-3.5" />
+        <span>⚡</span>
         Live
       </button>
     </div>

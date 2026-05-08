@@ -9,8 +9,6 @@ use crate::db::{queries, BotRecord};
 use crate::middleware::auth::Claims;
 use crate::trading::PolymarketClient;
 
-/// Normalize trading mode: "paper" is aliased to "demo" for backwards compatibility.
-/// The canonical values are "demo" and "live".
 fn normalize_mode(mode: &str) -> &'static str {
     match mode {
         "live" => "live",
@@ -18,775 +16,194 @@ fn normalize_mode(mode: &str) -> &'static str {
     }
 }
 
-fn default_trading_mode() -> String { "demo".to_string() }
 use super::AppState;
 
-// ==================== Response Types ====================
+// ==================== Response & Request Types ====================
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BotResponse {
-    pub id: i64,
-    pub name: String,
-    pub market_id: String,
-    pub strategy_type: String,
-    pub params: String,
-    pub status: String,
-    pub created_at: String,
-    pub bet_size: f64,
-    pub use_kelly: bool,
-    pub kelly_fraction: f64,
-    pub max_bet: f64,
-    pub interval: i64,
-    pub stop_loss: f64,
-    pub take_profit: f64,
-    pub total_trades: i64,
-    pub winning_trades: i64,
-    pub losing_trades: i64,
-    pub win_rate: f64,
-    pub trading_mode: String,
+    pub id: i64, pub name: String, pub market_id: String, pub strategy_type: String,
+    pub params: String, pub status: String, pub created_at: String, pub bet_size: f64,
+    pub use_kelly: bool, pub kelly_fraction: f64, pub max_bet: f64, pub interval: i64,
+    pub stop_loss: f64, pub take_profit: f64, pub total_trades: i64, pub winning_trades: i64,
+    pub losing_trades: i64, pub win_rate: f64, pub trading_mode: String,
 }
 
 impl From<BotRecord> for BotResponse {
     fn from(r: BotRecord) -> Self {
         Self {
-            id: r.id,
-            name: r.name,
-            market_id: r.market_id,
-            strategy_type: r.strategy_type,
-            params: r.params,
-            status: r.status,
-            created_at: r.created_at,
-            bet_size: r.bet_size,
-            use_kelly: r.use_kelly != 0,
-            kelly_fraction: r.kelly_fraction,
-            max_bet: r.max_bet,
-            interval: r.interval,
-            stop_loss: r.stop_loss,
-            take_profit: r.take_profit,
-            total_trades: r.total_trades,
-            winning_trades: r.winning_trades,
-            losing_trades: r.losing_trades,
-            win_rate: r.win_rate,
-            trading_mode: r.trading_mode,
+            id: r.id, name: r.name, market_id: r.market_id, strategy_type: r.strategy_type,
+            params: r.params, status: r.status, created_at: r.created_at, bet_size: r.bet_size,
+            use_kelly: r.use_kelly != 0, kelly_fraction: r.kelly_fraction, max_bet: r.max_bet,
+            interval: r.interval, stop_loss: r.stop_loss, take_profit: r.take_profit,
+            total_trades: r.total_trades, winning_trades: r.winning_trades, losing_trades: r.losing_trades,
+            win_rate: r.win_rate, trading_mode: r.trading_mode,
         }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ErrorResponse {
-    pub error: String,
-}
+pub struct ErrorResponse { pub error: String }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateBotRequest {
-    pub name: String,
-    pub market_id: String,
-    pub strategy_type: Option<String>,
-    pub strategy: Option<String>,
-    pub params: Option<String>,
-    #[serde(default = "default_bet_size")]
-    pub bet_size: f64,
-    #[serde(default = "default_use_kelly")]
-    pub use_kelly: bool,
-    #[serde(default = "default_kelly_fraction")]
-    pub kelly_fraction: f64,
-    #[serde(default = "default_max_bet")]
-    pub max_bet: f64,
-    #[serde(default = "default_interval")]
-    pub interval: i64,
-    #[serde(default = "default_stop_loss")]
-    pub stop_loss: f64,
-    #[serde(default = "default_take_profit")]
-    pub take_profit: f64,
-    #[serde(default = "default_trading_mode")]
-    pub trading_mode: String,
+    pub name: String, pub market_id: String, pub strategy_type: Option<String>,
+    pub strategy: Option<String>, pub params: Option<String>, pub bet_size: f64,
+    pub use_kelly: bool, pub kelly_fraction: f64, pub max_bet: f64, pub interval: i64,
+    pub stop_loss: f64, pub take_profit: f64, pub trading_mode: String,
 }
-
-fn default_bet_size() -> f64 { 1.0 }
-fn default_use_kelly() -> bool { true }
-fn default_kelly_fraction() -> f64 { 0.25 }
-fn default_max_bet() -> f64 { 0.25 }
-fn default_interval() -> i64 { 60000 }
-fn default_stop_loss() -> f64 { 0.1 }
-fn default_take_profit() -> f64 { 0.2 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct StartBotRequest {
-    pub initial_balance: Option<f64>,
-    pub mode: Option<String>,
-}
+pub struct StartBotRequest { pub initial_balance: Option<f64>, pub mode: Option<String> }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateBotRequest {
-    pub name: Option<String>,
-    pub market_id: Option<String>,
-    pub strategy_type: Option<String>,
-    pub params: Option<String>,
-    pub bet_size: Option<f64>,
-    pub use_kelly: Option<bool>,
-    pub kelly_fraction: Option<f64>,
-    pub max_bet: Option<f64>,
-    pub interval: Option<i64>,
-    pub stop_loss: Option<f64>,
-    pub take_profit: Option<f64>,
+    pub name: Option<String>, pub market_id: Option<String>, pub strategy_type: Option<String>,
+    pub params: Option<String>, pub bet_size: Option<f64>, pub use_kelly: Option<bool>,
+    pub kelly_fraction: Option<f64>, pub max_bet: Option<f64>, pub interval: Option<i64>,
+    pub stop_loss: Option<f64>, pub take_profit: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct BotStatusResponse {
-    pub success: bool,
-    pub status: String,
-}
+pub struct BotStatusResponse { pub success: bool, pub status: String }
 
 #[derive(Debug, Serialize)]
 pub struct SessionResponse {
-    pub session_id: i64,
-    pub bot_id: i64,
-    pub status: String,
-    pub start_time: String,
-    pub end_time: Option<String>,
-    pub start_balance: f64,
-    pub end_balance: Option<f64>,
-    pub total_trades: i64,
-    pub winning_trades: i64,
-    pub losing_trades: i64,
-    pub total_pnl: f64,
-    pub max_drawdown: f64,
+    pub session_id: i64, pub bot_id: i64, pub status: String, pub start_time: String,
+    pub end_time: Option<String>, pub start_balance: f64, pub end_balance: Option<f64>,
+    pub total_trades: i64, pub winning_trades: i64, pub losing_trades: i64,
+    pub total_pnl: f64, pub max_drawdown: f64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PortfolioResponse {
-    pub bot_id: i64,
-    pub balance: f64,
-    pub initial_balance: f64,
-    pub open_positions: i64,
-    pub total_trades: i64,
-    pub winning_trades: i64,
-    pub losing_trades: i64,
-    pub total_pnl: f64,
-    pub peak_balance: f64,
-    pub win_rate: f64,
-    pub roi_percent: f64,
-    pub drawdown_percent: f64,
-    pub avg_pnl_per_trade: f64,
-    pub unrealized_pnl: f64,
-    pub total_position_value: f64,
-}
-
-impl PortfolioResponse {
-    pub fn from_record(p: crate::db::BotPortfolioRecord) -> Self {
-        let win_rate = if p.total_trades > 0 {
-            p.winning_trades as f64 / p.total_trades as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let roi_percent = if p.initial_balance > 0.0 {
-            (p.balance - p.initial_balance) / p.initial_balance * 100.0
-        } else {
-            0.0
-        };
-
-        let drawdown_percent = if p.peak_balance > 0.0 {
-            (p.peak_balance - p.balance) / p.peak_balance * 100.0
-        } else {
-            0.0
-        };
-
-        let avg_pnl_per_trade = if p.total_trades > 0 {
-            p.total_pnl / p.total_trades as f64
-        } else {
-            0.0
-        };
-
-        Self {
-            bot_id: p.bot_id,
-            balance: p.balance,
-            initial_balance: p.initial_balance,
-            open_positions: p.open_positions,
-            total_trades: p.total_trades,
-            winning_trades: p.winning_trades,
-            losing_trades: p.losing_trades,
-            total_pnl: p.total_pnl,
-            peak_balance: p.peak_balance,
-            win_rate,
-            roi_percent,
-            drawdown_percent,
-            avg_pnl_per_trade,
-            unrealized_pnl: 0.0,
-            total_position_value: 0.0,
-        }
-    }
-
-    pub fn from_record_with_positions(
-        p: crate::db::BotPortfolioRecord,
-        unrealized_pnl: f64,
-        total_position_value: f64,
-    ) -> Self {
-        let mut resp = Self::from_record(p);
-        resp.unrealized_pnl = unrealized_pnl;
-        resp.total_position_value = total_position_value;
-        resp
-    }
+    pub bot_id: i64, pub balance: f64, pub initial_balance: f64, pub open_positions: i64,
+    pub total_trades: i64, pub winning_trades: i64, pub losing_trades: i64, pub total_pnl: f64,
+    pub peak_balance: f64, pub win_rate: f64, pub roi_percent: f64, pub drawdown_percent: f64,
+    pub avg_pnl_per_trade: f64, pub unrealized_pnl: f64, pub total_position_value: f64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TradeDecisionResponse {
-    pub id: i64,
-    pub bot_id: i64,
-    pub session_id: i64,
-    pub market_slug: String,
-    pub outcome: String,
-    pub signal_confidence: f64,
-    pub btc_price: Option<f64>,
-    pub yes_price: Option<f64>,
-    pub no_price: Option<f64>,
-    pub time_remaining: Option<i64>,
-    pub decision_reason: String,
-    pub created_at: String,
+    pub id: i64, pub bot_id: i64, pub session_id: i64, pub market_slug: String,
+    pub outcome: String, pub signal_confidence: f64, pub btc_price: Option<f64>,
+    pub yes_price: Option<f64>, pub no_price: Option<f64>, pub time_remaining: Option<i64>,
+    pub decision_reason: String, pub created_at: String,
 }
 
-// ==================== Helper Functions ====================
+impl PortfolioResponse {
+    pub fn from_record_with_positions(p: crate::db::BotPortfolioRecord, unrealized_pnl: f64, total_position_value: f64) -> Self {
+        let win_rate = if p.total_trades > 0 { p.winning_trades as f64 / p.total_trades as f64 * 100.0 } else { 0.0 };
+        Self {
+            bot_id: p.bot_id, balance: p.balance, initial_balance: p.initial_balance, open_positions: p.open_positions,
+            total_trades: p.total_trades, winning_trades: p.winning_trades, losing_trades: p.losing_trades,
+            total_pnl: p.total_pnl, peak_balance: p.peak_balance, win_rate,
+            roi_percent: if p.initial_balance > 0.0 { (p.balance - p.initial_balance) / p.initial_balance * 100.0 } else { 0.0 },
+            drawdown_percent: if p.peak_balance > 0.0 { (p.peak_balance - p.balance) / p.peak_balance * 100.0 } else { 0.0 },
+            avg_pnl_per_trade: if p.total_trades > 0 { p.total_pnl / p.total_trades as f64 } else { 0.0 },
+            unrealized_pnl, total_position_value,
+        }
+    }
+}
+
+// ==================== Shared Logic ====================
 
 async fn fetch_unrealized_pnl(state: &AppState, user_id: i64) -> (f64, f64, i64) {
     let cache = state.credential_cache.read().await;
     let creds = cache.get(&user_id).cloned();
-    drop(cache);
-
-    let Some(creds) = creds else {
-        return (0.0, 0.0, 0);
-    };
-
-    let client = match PolymarketClient::new(&creds.private_key) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("Failed to create client for position check: {}", e);
-            return (0.0, 0.0, 0);
-        }
-    };
-
-    match client.get_positions().await {
-        Ok(positions) => {
-            let mut unrealized_pnl = 0.0;
-            let mut total_value = 0.0;
-            let open_positions_count = positions.len() as i64;
-
-            for pos in &positions {
-                if let Some(value) = pos.current_value {
-                    total_value += value;
-                    if let Some(bought) = pos.total_bought {
-                        unrealized_pnl += value - bought;
-                    }
+    if let Some(c) = creds {
+        if let Ok(client) = PolymarketClient::new(&c.private_key) {
+            if let Ok(pos) = client.get_positions().await {
+                let mut upnl = 0.0; let mut val = 0.0;
+                for p in &pos {
+                    val += p.current_value.unwrap_or(0.0);
+                    upnl += p.current_value.unwrap_or(0.0) - p.total_bought.unwrap_or(0.0);
                 }
-            }
-            (unrealized_pnl, total_value, open_positions_count)
-        }
-        Err(e) => {
-            tracing::warn!("Failed to fetch positions for user {}: {}", user_id, e);
-            (0.0, 0.0, 0)
-        }
-    }
-}
-
-// ==================== CRUD Endpoints ====================
-
-pub async fn create_bot(
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-    Json(payload): Json<CreateBotRequest>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-
-    if payload.name.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(ErrorResponse {
-            error: "Bot name is required".to_string(),
-        })).into_response();
-    }
-
-    if payload.market_id.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(ErrorResponse {
-            error: "Market ID is required".to_string(),
-        })).into_response();
-    }
-
-    match queries::get_bot_by_name(&db, user_id, &payload.name).await {
-        Ok(Some(_)) => {
-            return (StatusCode::CONFLICT, Json(ErrorResponse {
-                error: format!("Bot with name '{}' already exists", payload.name),
-            })).into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to check duplicate bot: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                error: "Failed to create bot".to_string(),
-            })).into_response();
-        }
-        _ => {}
-    }
-
-    let strategy = payload.strategy_type
-        .or(payload.strategy)
-        .unwrap_or_else(|| "btc_5min".to_string());
-    let params = payload.params.unwrap_or_else(|| "{}".to_string());
-
-    match queries::create_bot_with_config(
-        &db,
-        user_id,
-        &payload.name,
-        &payload.market_id,
-        &strategy,
-        &params,
-        payload.bet_size,
-        payload.use_kelly,
-        payload.kelly_fraction,
-        payload.max_bet,
-        payload.interval,
-        payload.stop_loss,
-        payload.take_profit,
-        &payload.trading_mode,
-    ).await {
-        Ok(bot_id) => Json(serde_json::json!({
-            "id": bot_id,
-            "name": payload.name,
-            "market_id": payload.market_id,
-            "strategy_type": strategy,
-            "params": params,
-            "status": "stopped",
-            "bet_size": payload.bet_size,
-            "use_kelly": payload.use_kelly,
-            "kelly_fraction": payload.kelly_fraction,
-            "max_bet": payload.max_bet,
-            "interval": payload.interval,
-            "stop_loss": payload.stop_loss,
-            "take_profit": payload.take_profit,
-            "trading_mode": payload.trading_mode
-        })).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to create bot: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                error: "Failed to create bot".to_string(),
-            })).into_response()
-        }
-    }
-}
-
-pub async fn list_bots(
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-
-    match queries::get_bots_by_user(&db, user_id).await {
-        Ok(bots) => Json(bots.into_iter().map(BotResponse::from).collect::<Vec<_>>()).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to list bots: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                error: "Failed to list bots".to_string(),
-            })).into_response()
-        }
-    }
-}
-
-pub async fn get_bot(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-
-    match queries::get_bot_by_id(&db, id, user_id).await {
-        Ok(Some(bot)) => Json(BotResponse::from(bot)).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(ErrorResponse {
-            error: "Bot not found".to_string(),
-        })).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get bot: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                error: "Failed to get bot".to_string(),
-            })).into_response()
-        }
-    }
-}
-
-pub async fn update_bot(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-    Json(payload): Json<UpdateBotRequest>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-
-    if let Err(e) = queries::update_bot(
-        &db, id, user_id,
-        payload.name.as_deref(),
-        payload.market_id.as_deref(),
-        payload.strategy_type.as_deref(),
-        payload.params.as_deref(),
-    ).await {
-        tracing::error!("Failed to update bot: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-            error: "Failed to update bot".to_string(),
-        })).into_response();
-    }
-
-    if let Err(e) = queries::update_bot_config(
-        &db, id, user_id,
-        payload.bet_size,
-        payload.use_kelly,
-        payload.kelly_fraction,
-        payload.max_bet,
-        payload.interval,
-        payload.stop_loss,
-        payload.take_profit,
-    ).await {
-        tracing::error!("Failed to update bot config: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-            error: "Failed to update bot config".to_string(),
-        })).into_response();
-    }
-
-    Json(serde_json::json!({"success": true})).into_response()
-}
-
-pub async fn delete_bot(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-
-    match queries::delete_bot(&db, id, user_id).await {
-        Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to delete bot: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                error: "Failed to delete bot".to_string(),
-            })).into_response()
-        }
-    }
-}
-
-pub async fn start_bot(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-    payload: Option<Json<StartBotRequest>>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-
-    let bot = match queries::get_bot_by_id(&db, id, user_id).await {
-        Ok(Some(b)) => b,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(ErrorResponse {
-            error: "Bot not found".to_string(),
-        })).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get bot: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                error: "Failed to get bot".to_string(),
-            })).into_response();
-        }
-    };
-
-    if state.orchestrator.is_running(id).await {
-        return (StatusCode::CONFLICT, Json(ErrorResponse {
-            error: "Bot is already running".to_string(),
-        })).into_response();
-    }
-
-    let requested_balance = payload
-        .as_ref()
-        .and_then(|p| p.initial_balance)
-        .unwrap_or(10.0);
-    let requested_mode = payload.as_ref().and_then(|p| p.mode.as_deref());
-    let bot_mode = requested_mode.unwrap_or(&bot.trading_mode);
-    let is_demo = normalize_mode(bot_mode) == "demo";
-    
-    let initial_balance = if is_demo {
-        let paper_balance = requested_balance;
-        let min_required = bot.bet_size.max(1.0);
-        if paper_balance < min_required {
-            return (StatusCode::BAD_REQUEST, Json(ErrorResponse {
-                error: format!("Bet size ${:.2} exceeds paper trading balance ${:.2}", bot.bet_size, paper_balance),
-            })).into_response();
-        }
-
-        match queries::get_portfolio(&db, id, user_id).await {
-            Ok(Some(_)) => {
-                let _ = queries::reset_portfolio(&db, id, paper_balance).await;
-            }
-            _ => {
-                let _ = queries::ensure_portfolio(&db, id, user_id, paper_balance).await;
+                return (upnl, val, pos.len() as i64);
             }
         }
-        paper_balance
-    } else {
-        let creds = match state.credential_service.get_credentials(&db, user_id).await {
-            Ok(c) => c,
-            Err(_) => return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "No credentials".to_string() })).into_response(),
-        };
-
-        let pm_client = PolymarketClient::new(&creds.private_key).unwrap();
-        let wallet_balance = pm_client.get_balance().await.unwrap_or(0.0);
-
-        if wallet_balance <= 0.0 {
-            return (StatusCode::PAYMENT_REQUIRED, Json(ErrorResponse { error: "Insufficient USDC".to_string() })).into_response();
-        }
-
-        let _ = queries::ensure_portfolio(&db, id, user_id, wallet_balance).await;
-        wallet_balance
-    };
-
-    match state.orchestrator.start_bot(&bot, initial_balance).await {
-        Ok(session_id) => {
-            let interval_secs = (bot.interval / 1000).max(10) as u64;
-            let orchestrator = state.orchestrator.clone();
-            let cred_cache = state.credential_cache.clone();
-            tokio::spawn(async move {
-                crate::trading::orchestrator::start_orchestrator_loop(
-                    orchestrator, id, user_id, interval_secs, Some(cred_cache)
-                ).await;
-            });
-
-            Json(BotStatusResponse { success: true, status: "running".to_string() }).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })).into_response()
     }
+    (0.0, 0.0, 0)
 }
 
-pub async fn stop_bot(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let user_id = claims.user_id;
-    match state.orchestrator.stop_bot(id, user_id).await {
-        Ok(_) => Json(BotStatusResponse { success: true, status: "stopped".to_string() }).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })).into_response()
-    }
-}
+// ==================== Endpoints ====================
 
-// ==================== Portfolio & Session ====================
-
-pub async fn get_portfolio(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-
-    let portfolio = match queries::get_portfolio(&db, id, user_id).await {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            let _ = queries::ensure_portfolio(&db, id, user_id, 100.0).await;
-            queries::get_portfolio(&db, id, user_id).await.unwrap().unwrap()
-        },
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
-    };
-
-    let (unrealized_pnl, total_position_value, live_positions) = fetch_unrealized_pnl(&state, user_id).await;
-
-    let mut response = PortfolioResponse::from_record_with_positions(
-        portfolio, unrealized_pnl, total_position_value,
-    );
-    
-    response.open_positions = live_positions;
-    Json(response).into_response()
-}
-
-pub async fn get_session(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-
-    match queries::get_bot_by_id(&db, id, user_id).await {
-        Ok(Some(_)) => {
-            match queries::get_active_session(&db, id).await {
-                Ok(Some(s)) => Json(SessionResponse {
-                    session_id: s.id,
-                    bot_id: s.bot_id,
-                    status: s.status,
-                    start_time: s.start_time,
-                    end_time: s.end_time,
-                    start_balance: s.start_balance,
-                    end_balance: s.end_balance,
-                    total_trades: s.total_trades,
-                    winning_trades: s.winning_trades,
-                    losing_trades: s.losing_trades,
-                    total_pnl: s.total_pnl,
-                    max_drawdown: s.max_drawdown,
-                }).into_response(),
-                _ => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "No active session".to_string() })).into_response(),
-            }
-        },
-        _ => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Bot not found".to_string() })).into_response(),
-    }
-}
-
-pub async fn get_aggregate_portfolio(
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-
-    let (unrealized_pnl, total_position_value, live_positions) = fetch_unrealized_pnl(&state, user_id).await;
-
-    match queries::get_bots_by_user(&db, user_id).await {
-        Ok(bots) => {
-            let mut total_balance = 0.0;
-            let mut total_initial = 0.0;
-            let mut total_pnl = 0.0;
-            let mut total_trades = 0;
-            let mut total_wins = 0;
-            let mut running_bots = 0;
-            let mut bot_portfolios = Vec::new();
-
-            for bot in &bots {
-                if let Ok(Some(portfolio)) = queries::get_portfolio(&db, bot.id, user_id).await {
-                    total_balance += portfolio.balance;
-                    total_initial += portfolio.initial_balance;
-                    total_pnl += portfolio.total_pnl;
-                    total_trades += portfolio.total_trades;
-                    total_wins += portfolio.winning_trades;
-
-                    let mut p_resp = PortfolioResponse::from_record(portfolio);
-                    if live_positions > 0 { p_resp.open_positions = live_positions; }
-                    bot_portfolios.push(p_resp);
-                }
-                if state.orchestrator.is_running(bot.id).await { running_bots += 1; }
-            }
-
-            let overall_win_rate = if total_trades > 0 { total_wins as f64 / total_trades as f64 * 100.0 } else { 0.0 };
-            let overall_roi = if total_initial > 0.0 { (total_balance - total_initial) / total_initial * 100.0 } else { 0.0 };
-            let avg_pnl_per_trade = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
-
-            Json(serde_json::json!({
-                "user_id": user_id,
-                "total_bots": bots.len(),
-                "running_bots": running_bots,
-                "total_balance": total_balance,
-                "total_pnl": total_pnl,
-                "total_trades": total_trades,
-                "overall_win_rate": overall_win_rate,
-                "overall_roi_percent": overall_roi,
-                "avg_pnl_per_trade": avg_pnl_per_trade,
-                "unrealized_pnl": unrealized_pnl,
-                "total_position_value": total_position_value,
-                "open_positions": live_positions,
-                "bots": bot_portfolios
-            })).into_response()
-        },
+pub async fn create_bot(State(state): State<AppState>, Extension(claims): Extension<Claims>, Json(payload): Json<CreateBotRequest>) -> Response {
+    let strategy = payload.strategy_type.or(payload.strategy).unwrap_or_else(|| "momentum".into());
+    let params = payload.params.unwrap_or_else(|| "{}".into());
+    match queries::create_bot_with_config(&state.db(), claims.user_id, &payload.name, &payload.market_id, &strategy, &params, payload.bet_size, payload.use_kelly, payload.kelly_fraction, payload.max_bet, payload.interval, payload.stop_loss, payload.take_profit, &payload.trading_mode).await {
+        Ok(id) => Json(serde_json::json!({ "id": id, "success": true })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response()
     }
 }
 
-// ==================== History & Trades ====================
-
-pub async fn get_history(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-    match queries::get_bot_sessions(&db, id, user_id).await {
-        Ok(sessions) => {
-            let resp: Vec<SessionResponse> = sessions.into_iter().map(|s| SessionResponse {
-                session_id: s.id,
-                bot_id: s.bot_id,
-                status: s.status,
-                start_time: s.start_time,
-                end_time: s.end_time,
-                start_balance: s.start_balance,
-                end_balance: s.end_balance,
-                total_trades: s.total_trades,
-                winning_trades: s.winning_trades,
-                losing_trades: s.losing_trades,
-                total_pnl: s.total_pnl,
-                max_drawdown: s.max_drawdown,
-            }).collect();
-            Json(resp).into_response()
-        },
+pub async fn list_bots(State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    match queries::get_bots_by_user(&state.db(), claims.user_id).await {
+        Ok(bots) => Json(bots.into_iter().map(BotResponse::from).collect::<Vec<_>>()).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
 }
 
-pub async fn get_trades(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-    match queries::get_trade_decisions(&db, id, user_id).await {
-        Ok(decisions) => {
-            let resp: Vec<TradeDecisionResponse> = decisions.into_iter().map(|d| TradeDecisionResponse {
-                id: d.id,
-                bot_id: d.bot_id,
-                session_id: d.session_id,
-                market_slug: d.market_slug,
-                outcome: d.outcome,
-                signal_confidence: d.signal_confidence,
-                btc_price: d.btc_price,
-                yes_price: d.market_yes_price,
-                no_price: d.market_no_price,
-                time_remaining: d.time_remaining,
-                decision_reason: d.decision_reason.unwrap_or_default(),
-                created_at: d.created_at,
-            }).collect();
-            Json(resp).into_response()
-        },
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR).into_response()
+pub async fn get_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    match queries::get_bot_by_id(&state.db(), id, claims.user_id).await {
+        Ok(Some(bot)) => Json(BotResponse::from(bot)).into_response(),
+        _ => (StatusCode::NOT_FOUND).into_response()
     }
 }
 
-// ==================== Bulk & Reset & Mode ====================
-
-pub async fn reset_bot(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
+pub async fn start_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
     if state.orchestrator.is_running(id).await {
-        let _ = state.orchestrator.stop_bot(id, user_id).await;
+        return (StatusCode::CONFLICT, Json(ErrorResponse { error: "Bot is already running".to_string() })).into_response();
     }
-    match queries::reset_portfolio(&db, id, 100.0).await {
-        Ok(_) => Json(serde_json::json!({ "success": true, "new_balance": 100.0 })).into_response(),
+    if let Ok(Some(bot)) = queries::get_bot_by_id(&state.db(), id, claims.user_id).await {
+        let balance = queries::get_portfolio(&state.db(), id, claims.user_id).await.ok().flatten().map(|p| p.balance).unwrap_or(100.0);
+        if state.orchestrator.start_bot(&bot, balance).await.is_ok() {
+            let orchestrator = state.orchestrator.clone();
+            let cred_cache = state.credential_cache.clone();
+            let user_id = claims.user_id;
+            tokio::spawn(async move { crate::trading::orchestrator::start_orchestrator_loop(orchestrator, id, user_id, 15, Some(cred_cache)).await; });
+            return Json(BotStatusResponse { success: true, status: "running".to_string() }).into_response();
+        }
+    }
+    (StatusCode::INTERNAL_SERVER_ERROR).into_response()
+}
+
+pub async fn stop_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    match state.orchestrator.stop_bot(id, claims.user_id).await {
+        Ok(_) => Json(BotStatusResponse { success: true, status: "stopped".to_string() }).into_response(),
         _ => (StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
 }
 
-pub async fn reset_demo_balance(
-    Path((id,)): Path<(i64,)>,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-    match queries::reset_portfolio(&db, id, 10.0).await {
-        Ok(_) => Json(serde_json::json!({ "success": true, "new_balance": 10.0 })).into_response(),
-        _ => (StatusCode::INTERNAL_SERVER_ERROR).into_response()
+pub async fn get_portfolio(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    if let Ok(Some(p)) = queries::get_portfolio(&state.db(), id, claims.user_id).await {
+        let (upnl, val, pos_count) = fetch_unrealized_pnl(&state, claims.user_id).await;
+        let mut resp = PortfolioResponse::from_record_with_positions(p, upnl, val);
+        resp.open_positions = pos_count;
+        return Json(resp).into_response();
     }
+    (StatusCode::NOT_FOUND).into_response()
 }
+
+pub async fn reset_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    let _ = state.orchestrator.stop_bot(id, claims.user_id).await;
+    let _ = queries::reset_portfolio(&state.db(), id, 100.0).await;
+    Json(serde_json::json!({"success": true})).into_response()
+}
+
+// --- BULK OPERATIONS ---
 
 pub async fn run_all_bots(State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-    if let Ok(bots) = queries::get_bots_by_user(&db, user_id).await {
+    if let Ok(bots) = queries::get_bots_by_user(&state.db(), claims.user_id).await {
         for bot in bots {
             if !state.orchestrator.is_running(bot.id).await {
-                let _ = state.orchestrator.start_bot(&bot, 100.0).await;
+                let balance = queries::get_portfolio(&state.db(), bot.id, claims.user_id).await.ok().flatten().map(|p| p.balance).unwrap_or(100.0);
+                let _ = state.orchestrator.start_bot(&bot, balance).await;
+                let orchestrator = state.orchestrator.clone();
+                let cred_cache = state.credential_cache.clone();
+                let bot_id = bot.id;
+                let user_id = claims.user_id;
+                tokio::spawn(async move { crate::trading::orchestrator::start_orchestrator_loop(orchestrator, bot_id, user_id, 15, Some(cred_cache)).await; });
             }
         }
     }
@@ -794,31 +211,84 @@ pub async fn run_all_bots(State(state): State<AppState>, Extension(claims): Exte
 }
 
 pub async fn stop_all_bots(State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
-    let user_id = claims.user_id;
-    let running = state.orchestrator.get_running_bots(user_id).await;
-    for bot_id in running {
-        let _ = state.orchestrator.stop_bot(bot_id, user_id).await;
+    let running = state.orchestrator.get_running_bots(claims.user_id).await;
+    for id in running { let _ = state.orchestrator.stop_bot(id, claims.user_id).await; }
+    Json(serde_json::json!({"success": true})).into_response()
+}
+
+pub async fn reset_all_bots(State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    if let Ok(bots) = queries::get_bots_by_user(&state.db(), claims.user_id).await {
+        for bot in bots {
+            let _ = state.orchestrator.stop_bot(bot.id, claims.user_id).await;
+            let _ = queries::reset_portfolio(&state.db(), bot.id, 100.0).await;
+        }
     }
     Json(serde_json::json!({"success": true})).into_response()
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SetModeRequest {
-    pub trading_mode: String,
+// --- Others ---
+
+pub async fn get_session(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(_): Extension<Claims>) -> Response {
+    if let Ok(Some(s)) = queries::get_active_session(&state.db(), id).await {
+        return Json(SessionResponse {
+            session_id: s.id, bot_id: s.bot_id, status: s.status, start_time: s.start_time,
+            end_time: s.end_time, start_balance: s.start_balance, end_balance: s.end_balance,
+            total_trades: s.total_trades, winning_trades: s.winning_trades, losing_trades: s.losing_trades,
+            total_pnl: s.total_pnl, max_drawdown: s.max_drawdown,
+        }).into_response();
+    }
+    (StatusCode::NOT_FOUND).into_response()
 }
 
-pub async fn set_all_bots_mode(
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-    Json(payload): Json<SetModeRequest>,
-) -> Response {
-    let db = state.db();
-    let user_id = claims.user_id;
-    let mode = if payload.trading_mode == "live" { "live" } else { "paper" };
-    match sqlx::query("UPDATE bot_configs SET trading_mode = ? WHERE user_id = ?")
-        .bind(mode).bind(user_id).execute(db.as_ref()).await 
-    {
-        Ok(_) => Json(serde_json::json!({"success": true, "trading_mode": mode})).into_response(),
-        _ => (StatusCode::INTERNAL_SERVER_ERROR).into_response()
+pub async fn get_trades(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    if let Ok(decisions) = queries::get_trade_decisions(&state.db(), id, claims.user_id).await {
+        let resp: Vec<TradeDecisionResponse> = decisions.into_iter().map(|d| TradeDecisionResponse {
+            id: d.id, bot_id: d.bot_id, session_id: d.session_id, market_slug: d.market_slug, outcome: d.outcome,
+            signal_confidence: d.signal_confidence, btc_price: d.btc_price, yes_price: d.market_yes_price,
+            no_price: d.market_no_price, time_remaining: d.time_remaining, decision_reason: d.decision_reason.unwrap_or_default(),
+            created_at: d.created_at,
+        }).collect();
+        return Json(resp).into_response();
     }
+    (StatusCode::INTERNAL_SERVER_ERROR).into_response()
+}
+
+pub async fn get_history(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    if let Ok(sessions) = queries::get_bot_sessions(&state.db(), id, claims.user_id).await {
+        let resp: Vec<SessionResponse> = sessions.into_iter().map(|s| SessionResponse {
+            session_id: s.id, bot_id: s.bot_id, status: s.status, start_time: s.start_time,
+            end_time: s.end_time, start_balance: s.start_balance, end_balance: s.end_balance,
+            total_trades: s.total_trades, winning_trades: s.winning_trades, losing_trades: s.losing_trades,
+            total_pnl: s.total_pnl, max_drawdown: s.max_drawdown,
+        }).collect();
+        return Json(resp).into_response();
+    }
+    (StatusCode::INTERNAL_SERVER_ERROR).into_response()
+}
+
+pub async fn reset_demo_balance(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(_): Extension<Claims>) -> Response {
+    let _ = queries::reset_portfolio(&state.db(), id, 10.0).await;
+    Json(serde_json::json!({"success": true})).into_response()
+}
+
+#[derive(Debug, Deserialize)] pub struct SetModeRequest { pub trading_mode: String }
+pub async fn set_all_bots_mode(State(state): State<AppState>, Extension(claims): Extension<Claims>, Json(p): Json<SetModeRequest>) -> Response {
+    let mode = if p.trading_mode == "live" { "live" } else { "paper" };
+    let _ = sqlx::query("UPDATE bot_configs SET trading_mode = ? WHERE user_id = ?").bind(mode).bind(claims.user_id).execute(state.db().as_ref()).await;
+    Json(serde_json::json!({"success": true})).into_response()
+}
+
+pub async fn update_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>, Json(p): Json<UpdateBotRequest>) -> Response {
+    let _ = queries::update_bot(&state.db(), id, claims.user_id, p.name.as_deref(), p.market_id.as_deref(), p.strategy_type.as_deref(), p.params.as_deref()).await;
+    Json(serde_json::json!({"success": true})).into_response()
+}
+
+pub async fn delete_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    let _ = queries::delete_bot(&state.db(), id, claims.user_id).await;
+    Json(serde_json::json!({"success": true})).into_response()
+}
+
+pub async fn get_aggregate_portfolio(State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    let (upnl, val, pos_count) = fetch_unrealized_pnl(&state, claims.user_id).await;
+    Json(serde_json::json!({ "unrealized_pnl": upnl, "total_position_value": val, "open_positions": pos_count })).into_response()
 }

@@ -1327,24 +1327,60 @@ pub mod queries {
         Ok(result)
     }
 
-    // === Portfolio queries ===
+  pub async fn init_portfolio(db: &Db, bot_id: i64, user_id: i64, initial_balance: f64) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO bot_portfolios 
+         (bot_id, user_id, balance, initial_balance, peak_balance, open_positions,
+          total_trades, winning_trades, losing_trades, total_pnl)
+         VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0.0)"
+    )
+    .bind(bot_id)
+    .bind(user_id)
+    .bind(initial_balance)
+    .bind(initial_balance)
+    .bind(initial_balance)
+    .execute(db.as_ref())
+    .await?;
+    Ok(())
+}
 
-    /// Get portfolio for a bot (returns None if no portfolio exists)
-    /// NOTE: bot_portfolios.bot_id is unique, user_id is stored for audit only
     pub async fn get_portfolio(
-        db: &Db,
-        bot_id: i64,
-        _user_id: i64,
-    ) -> Result<Option<BotPortfolioRecord>, sqlx::Error> {
-        let existing = sqlx::query_as::<_, BotPortfolioRecord>(
-            "SELECT * FROM bot_portfolios WHERE bot_id = ?"
-        )
-        .bind(bot_id)
-        .fetch_optional(db.as_ref())
-        .await?;
+    db: &Db,
+    bot_id: i64,
+    _user_id: i64,
+) -> Result<Option<BotPortfolioRecord>, sqlx::Error> {
+    let existing = sqlx::query_as::<_, BotPortfolioRecord>(
+        "SELECT * FROM bot_portfolios WHERE bot_id = ?"
+    )
+    .bind(bot_id)
+    .fetch_optional(db.as_ref())
+    .await?;
 
-        Ok(existing)
+    if existing.is_some() {
+        return Ok(existing);
     }
+    // Ha nincs rekord, hozd létre automatikusan
+sqlx::query(
+    "INSERT OR IGNORE INTO bot_portfolios 
+     (bot_id, user_id, balance, initial_balance, peak_balance, open_positions,
+      total_trades, winning_trades, losing_trades, total_pnl)
+     VALUES (?, ?, 100.0, 100.0, 100.0, 0, 0, 0, 0, 0.0)"
+)
+.bind(bot_id)
+.bind(_user_id)  // ← ez már ott van a paraméterben!
+.execute(db.as_ref())
+.await?;
+
+
+    let created = sqlx::query_as::<_, BotPortfolioRecord>(
+        "SELECT * FROM bot_portfolios WHERE bot_id = ?"
+    )
+    .bind(bot_id)
+    .fetch_optional(db.as_ref())
+    .await?;
+
+    Ok(created)
+}
 
     /// Create or reset portfolio with a given starting balance
     pub async fn ensure_portfolio(

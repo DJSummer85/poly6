@@ -131,11 +131,20 @@ async fn fetch_unrealized_pnl(state: &AppState, user_id: i64) -> (f64, f64, i64)
 pub async fn create_bot(State(state): State<AppState>, Extension(claims): Extension<Claims>, Json(payload): Json<CreateBotRequest>) -> Response {
     let strategy = payload.strategy_type.or(payload.strategy).unwrap_or_else(|| "momentum".into());
     let params = payload.params.unwrap_or_else(|| "{}".into());
-    match queries::create_bot_with_config(&state.db(), claims.user_id, &payload.name, &payload.market_id, &strategy, &params, payload.bet_size, payload.use_kelly, payload.kelly_fraction, payload.max_bet, payload.interval, payload.stop_loss, payload.take_profit, &payload.trading_mode).await {
-        Ok(id) => Json(serde_json::json!({ "id": id, "success": true })).into_response(),
+    match queries::create_bot_with_config(
+        &state.db(), claims.user_id, &payload.name, &payload.market_id,
+        &strategy, &params, payload.bet_size, payload.use_kelly, payload.kelly_fraction,
+        payload.max_bet, payload.interval, payload.stop_loss, payload.take_profit,
+        &payload.trading_mode
+    ).await {
+        Ok(id) => {
+           let _ = queries::init_portfolio(&state.db(), id, claims.user_id, 100.0).await;
+            Json(serde_json::json!({ "id": id, "success": true })).into_response()
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response()
     }
 }
+
 
 pub async fn list_bots(State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
     match queries::get_bots_by_user(&state.db(), claims.user_id).await {
@@ -176,14 +185,20 @@ pub async fn stop_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, 
 }
 
 pub async fn get_portfolio(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
-    if let Ok(Some(p)) = queries::get_portfolio(&state.db(), id, claims.user_id).await {
-        let (upnl, val, pos_count) = fetch_unrealized_pnl(&state, claims.user_id).await;
-        let mut resp = PortfolioResponse::from_record_with_positions(p, upnl, val);
-        resp.open_positions = pos_count;
-        return Json(resp).into_response();
+    match queries::get_portfolio(&state.db(), id, claims.user_id).await {
+        Ok(Some(p)) => {
+            let (upnl, val, pos_count) = fetch_unrealized_pnl(&state, claims.user_id).await;
+            let mut resp = PortfolioResponse::from_record_with_positions(p, upnl, val);
+            resp.open_positions = pos_count;
+            Json(resp).into_response()
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
-    (StatusCode::NOT_FOUND).into_response()
 }
+
+
+    
+
 
 pub async fn reset_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
     let _ = state.orchestrator.stop_bot(id, claims.user_id).await;

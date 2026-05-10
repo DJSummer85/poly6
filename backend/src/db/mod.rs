@@ -1607,7 +1607,7 @@ sqlx::query(
             sqlx::query(
                 r#"
                 UPDATE bot_portfolios SET
-                    balance = balance - ?,
+
                     losing_trades = losing_trades + 1,
                     total_trades = total_trades + 1,
                     total_pnl = total_pnl - ?,
@@ -1616,7 +1616,6 @@ sqlx::query(
                 WHERE bot_id = ?
                 "#,
             )
-            .bind(loss)
             .bind(loss)
             .bind(bot_id)
             .execute(pool)

@@ -27,6 +27,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting Polymarket V2 Backend");
 
     let db = db::init_db().await?;
+    sqlx::query("UPDATE bot_configs SET status = 'stopped' WHERE status = 'running'")
+    .execute(db.as_ref())
+    .await
+    .unwrap_or_default();
+sqlx::query("UPDATE bot_sessions SET status = 'stopped' WHERE status = 'running'")
+    .execute(db.as_ref())
+    .await
+    .unwrap_or_default();
+
     let app_state = AppState::new(db.clone());
 
     // === AUTO-LOAD CREDENTIALS ===

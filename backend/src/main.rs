@@ -27,13 +27,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting Polymarket V2 Backend");
 
     let db = db::init_db().await?;
-    // NOTE: Ne állítsuk le a botokat itt – a restore logika újraindítja őket.
-    // (Korábban ez a két sor törölte az összes futó bot státuszát, ezért
-    //  az alatta lévő auto-load soha nem talált semmit.)
 
     let app_state = AppState::new(db.clone());
 
-    // === AUTO-LOAD CREDENTIALS ===
+    // === AUTO-LOAD CREDENTIALS (csak a cache-t tölti fel, botokat NEM indít) ===
     {
         let pool = db.as_ref();
         let users = sqlx::query("SELECT id FROM users").fetch_all(pool).await.unwrap_or_default();
@@ -52,32 +49,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        tracing::info!("Credential cache loaded");
     }
 
-    // === AUTO-LOAD RUNNING BOTS ON STARTUP ===
+    // === MINDEN BOT STÁTUSZÁT "stopped"-ra ÁLLÍTJUK INDULÁSKOR ===
+    // A botokat kizárólag a felhasználó indíthatja el a dashboardon keresztül.
+    // Ez megakadályozza, hogy az előző session "running" státuszai automatikusan újraindítsák a botokat.
     {
         let pool = db.as_ref();
-        let active_bots = sqlx::query("SELECT id, user_id FROM bot_configs WHERE status = 'running'")
-            .fetch_all(pool).await.unwrap_or_default();
-
-        for bot_row in active_bots {
-            let bot_id: i64 = bot_row.get("id");
-            let user_id: i64 = bot_row.get("user_id");
-            
-            if let Ok(Some(bot_rec)) = db::queries::get_bot_by_id(&db, bot_id, user_id).await {
-                if let Ok(Some(portfolio)) = db::queries::get_portfolio(&db, bot_id, user_id).await {
-                    let _ = app_state.orchestrator.resume_bot(&bot_rec, portfolio.balance).await;
-                    let orch = app_state.orchestrator.clone();
-                    let cache = Some(app_state.credential_cache.clone());
-                    tokio::spawn(async move {
-                        trading::orchestrator::start_orchestrator_loop(orch, bot_id, user_id, 5, cache).await;
-                    });
-                }
-            }
-        }
+        let result = sqlx::query("UPDATE bot_configs SET status = 'stopped' WHERE status = 'running'")
+            .execute(pool)
+            .await
+            .unwrap_or_default();
+        tracing::info!("Reset {} bot(s) to 'stopped' status on startup", result.rows_affected());
     }
 
-    // Event broadcaster
+    // Event broadcaster (SSE-hez kell, botok nélkül is fut)
     let event_receiver = app_state.event_receiver.clone();
     let broadcaster = app_state.bot_event_broadcaster.clone();
     tokio::spawn(async move {
@@ -85,20 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(event) = rx.recv().await { let _ = broadcaster.send(event); }
     });
 
-// Restore any running bots from previous session
-    // This restarts bots that were running before the server was stopped
-    let restore_orchestrator = app_state.orchestrator.clone();
-    tokio::spawn(async move {
-        trading::orchestrator::restore_running_bots(restore_orchestrator).await;
-    });
-    tracing::info!("Bot restore from database started");
-
-    // Auto-save loop
+    // Auto-save loop (üres ha nincs futó bot, de kell a struktúra miatt)
     let orch_save = app_state.orchestrator.clone();
     tokio::spawn(async move { trading::orchestrator::start_auto_save_loop(orch_save).await; });
 
     // CORS layer
-
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
         .nest("/api", api::routes(app_state.clone()))
@@ -106,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3001));
-    tracing::info!("Listening on {}", addr);
+    tracing::info!("Listening on {} — bots will only start when manually triggered", addr);
     axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
     Ok(())
 }

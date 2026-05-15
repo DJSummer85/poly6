@@ -140,7 +140,7 @@ mod tests {
     fn test_momentum_yes_signal() {
         let strat = MomentumStrategy::default();
         let mut ctx = default_ctx();
-        ctx.btc_price_change = Some(0.003); // 0.3% increase
+        ctx.btc_price_change = Some(0.03); // 3% increase
         let decision = strat.evaluate(&ctx);
         assert!(matches!(decision.signal, Signal::Yes));
         assert!(decision.confidence > 0.60);

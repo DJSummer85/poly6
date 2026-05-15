@@ -104,17 +104,17 @@ impl SettlementService {
         let mut losing = 0;
 
         for (pos_id, bot_id, side, _market_id, size, avg_price) in positions {
-            let pnl = if side == outcome {
-                // Winning position: profit = size * (1 - avg_price) for YES, size * avg_price for NO
-                if side == "YES" {
-                    size * (1.0 - avg_price)
+            // Calculate effective cost basis:
+                // - For YES: cost = avg_price (what we paid to buy YES)
+                // - For NO: cost = 1.0 - avg_price (we sold YES, effective NO cost = 1.0 - sell_price)
+                let effective_cost = if side == "YES" { avg_price } else { 1.0 - avg_price };
+                let pnl = if side == outcome {
+                    // Winning position: payout 1.0 minus cost basis
+                    size * (1.0 - effective_cost)
                 } else {
-                    size * avg_price
-                }
-            } else {
-                // Losing position: lose the cost
-                -(size * avg_price)
-            };
+                    // Losing position: lose the cost basis
+                    -(size * effective_cost)
+                };
 
             // Update balance for this bot
             sqlx::query(

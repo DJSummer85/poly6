@@ -161,16 +161,26 @@ pub async fn get_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, E
 }
 
 pub async fn start_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
+    // FIX: Ellenőrzés hogy a bot már fut-e a memóriában
     if state.orchestrator.is_running(id).await {
         return (StatusCode::CONFLICT, Json(ErrorResponse { error: "Bot is already running".to_string() })).into_response();
     }
     if let Ok(Some(bot)) = queries::get_bot_by_id(&state.db(), id, claims.user_id).await {
-        let balance = queries::get_portfolio(&state.db(), id, claims.user_id).await.ok().flatten().map(|p| p.balance).unwrap_or(100.0);
+        // Portfolio egyenleg lekérése (ha nincs, 100.0 az alap)
+        let balance = queries::get_portfolio(&state.db(), id, claims.user_id).await
+            .ok().flatten().map(|p| p.balance).unwrap_or(100.0);
+
+        // FIX: start_bot az orchestrator-on keresztül → létrehozza a session-t és regisztrálja a bot-ot
         if state.orchestrator.start_bot(&bot, balance).await.is_ok() {
             let orchestrator = state.orchestrator.clone();
             let cred_cache = state.credential_cache.clone();
             let user_id = claims.user_id;
-            tokio::spawn(async move { crate::trading::orchestrator::start_orchestrator_loop(orchestrator, id, user_id, 15, Some(cred_cache)).await; });
+            // FIX: tokio::spawn indítja el a tényleges trading loop-ot
+            tokio::spawn(async move {
+                crate::trading::orchestrator::start_orchestrator_loop(
+                    orchestrator, id, user_id, 15, Some(cred_cache)
+                ).await;
+            });
             return Json(BotStatusResponse { success: true, status: "running".to_string() }).into_response();
         }
     }
@@ -191,7 +201,6 @@ pub async fn get_portfolio(Path((id,)): Path<(i64,)>, State(state): State<AppSta
             let mut resp = PortfolioResponse::from_record_with_positions(p, upnl, val);
             resp.open_positions = pos_count;
 
-            // ÚJ: Ha a bot memóriában pending_bet-tel rendelkezik, jelezzük
             let has_pending_bet = state.orchestrator.has_pending_bet(id).await;
             if has_pending_bet {
                 resp.open_positions = resp.open_positions.max(1);
@@ -206,10 +215,6 @@ pub async fn get_portfolio(Path((id,)): Path<(i64,)>, State(state): State<AppSta
     }
 }
 
-
-    
-
-
 pub async fn reset_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
     let _ = state.orchestrator.stop_bot(id, claims.user_id).await;
     let _ = queries::reset_portfolio(&state.db(), id, 100.0).await;
@@ -222,13 +227,18 @@ pub async fn run_all_bots(State(state): State<AppState>, Extension(claims): Exte
     if let Ok(bots) = queries::get_bots_by_user(&state.db(), claims.user_id).await {
         for bot in bots {
             if !state.orchestrator.is_running(bot.id).await {
-                let balance = queries::get_portfolio(&state.db(), bot.id, claims.user_id).await.ok().flatten().map(|p| p.balance).unwrap_or(100.0);
+                let balance = queries::get_portfolio(&state.db(), bot.id, claims.user_id).await
+                    .ok().flatten().map(|p| p.balance).unwrap_or(100.0);
                 let _ = state.orchestrator.start_bot(&bot, balance).await;
                 let orchestrator = state.orchestrator.clone();
                 let cred_cache = state.credential_cache.clone();
                 let bot_id = bot.id;
                 let user_id = claims.user_id;
-                tokio::spawn(async move { crate::trading::orchestrator::start_orchestrator_loop(orchestrator, bot_id, user_id, 15, Some(cred_cache)).await; });
+                tokio::spawn(async move {
+                    crate::trading::orchestrator::start_orchestrator_loop(
+                        orchestrator, bot_id, user_id, 15, Some(cred_cache)
+                    ).await;
+                });
             }
         }
     }

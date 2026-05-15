@@ -12,7 +12,6 @@ use crate::trading::PolymarketClient;
 use crate::trading::bot_executor::strategies::{Signal, StrategyExecutor};
 use crate::trading::market_data::MarketDataService;
 use crate::trading::polymarket;
-use crate::crypto;
 
 pub struct BotExecutor {
     db: Db,
@@ -49,14 +48,12 @@ impl BotExecutor {
         let interval_secs = self.interval_secs;
         let running = self.running.clone();
         let market_service = self.market_service.clone();
-        let private_key = private_key.to_string(); // Convert to owned String
+        let private_key = private_key.to_string();
 
-        // Spawn the execution loop
         tokio::spawn(async move {
             let mut interval_timer = interval(Duration::from_secs(interval_secs));
 
             loop {
-                // Check if we should stop
                 let should_run = *running.read().await;
                 if !should_run {
                     tracing::info!("Bot executor loop stopped");
@@ -65,7 +62,6 @@ impl BotExecutor {
 
                 interval_timer.tick().await;
 
-                // Get bot config
                 let bot = match queries::get_bot_by_id(&db, bot_id, user_id).await {
                     Ok(Some(b)) => b,
                     Ok(None) => {
@@ -78,36 +74,30 @@ impl BotExecutor {
                     }
                 };
 
-                // Check if bot is still enabled
                 if bot.status != "running" {
                     tracing::info!("Bot {} is not running (status: {})", bot_id, bot.status);
                     break;
                 }
 
-                // Execute the strategy cycle
                 if let Err(e) = Self::execute_bot_cycle(&db, bot_id, user_id, &bot, &private_key, &market_service).await {
                     tracing::error!("Bot cycle error: {}", e);
                 }
             }
 
-            // Mark as stopped
             *running.write().await = false;
         });
 
         Ok(())
     }
 
-    /// Stop the execution loop
     pub async fn stop(&self) {
         *self.running.write().await = false;
     }
 
-    /// Check if executor is running
     pub async fn is_running(&self) -> bool {
         *self.running.read().await
     }
 
-    /// Execute one cycle of the bot: get data -> evaluate strategy -> place order
     async fn execute_bot_cycle(
         db: &Db,
         bot_id: i64,
@@ -116,16 +106,10 @@ impl BotExecutor {
         private_key: &str,
         market_service: &MarketDataService,
     ) -> Result<(), String> {
-        // Get market snapshot with full Polymarket + Binance context
         let snapshot = market_service.get_snapshot(&bot.market_id).await?;
-
-        // Create strategy executor
         let strategy = StrategyExecutor::new(&bot.strategy_type, &bot.params);
-
-        // Evaluate strategy with full market context
         let signal = strategy.evaluate_with_context(snapshot.to_strategy_context());
 
-        // Log the signal
         let signal_msg = match &signal {
             Signal::Yes(conf) => format!("BUY YES with confidence {}", conf),
             Signal::No(conf) => format!("BUY NO with confidence {}", conf),
@@ -133,62 +117,51 @@ impl BotExecutor {
         };
 
         tracing::info!("Bot {} signal: {}", bot.name, signal_msg);
-
-        // Log activity
         let _ = Self::log_activity(db, user_id, Some(bot_id), "INFO", &signal_msg).await;
 
-        // Execute based on signal
         match signal {
-            Signal::Yes(confidence) | Signal::No(confidence) => {
-                // Place order on Polymarket
+            Signal::Yes(confidence) => {
+                // EV check: only trade if confidence > yes_price (positive expected value)
+                if confidence <= snapshot.yes_price {
+                    let msg = format!("Skipping YES: confidence {:.2}% <= YES price {:.0}c (negative EV)", confidence * 100.0, snapshot.yes_price * 100.0);
+                    tracing::warn!("Bot {}: {}", bot.name, msg);
+                    let _ = Self::log_activity(db, user_id, Some(bot_id), "WARNING", &msg).await;
+                    return Ok(());
+                }
                 Self::execute_trade(
                     db,
                     bot_id,
                     user_id,
                     &bot.market_id,
-                    if matches!(signal, Signal::Yes(_)) { "YES" } else { "NO" },
+                    "YES",
                     confidence,
                     private_key,
                 ).await?;
             }
-            Signal::Hold(_) => {
-                // No action needed
+            Signal::No(confidence) => {
+                // EV check: only trade if confidence > no_price (positive expected value)
+                if confidence <= snapshot.no_price {
+                    let msg = format!("Skipping NO: confidence {:.2}% <= NO price {:.0}c (negative EV)", confidence * 100.0, snapshot.no_price * 100.0);
+                    tracing::warn!("Bot {}: {}", bot.name, msg);
+                    let _ = Self::log_activity(db, user_id, Some(bot_id), "WARNING", &msg).await;
+                    return Ok(());
+                }
+                Self::execute_trade(
+                    db,
+                    bot_id,
+                    user_id,
+                    &bot.market_id,
+                    "NO",
+                    confidence,
+                    private_key,
+                ).await?;
             }
+            Signal::Hold(_) => {}
         }
 
         Ok(())
     }
 
-    /// Get current BTC price from Binance
-    async fn get_binance_price() -> Result<f64, String> {
-        // Try to fetch BTC/USDT price from Binance
-        let client = reqwest::Client::new();
-        let response = client
-            .get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
-            .send()
-            .await
-            .map_err(|e| format!("Binance request failed: {}", e))?;
-
-        if !response.status().is_success() {
-            return Err("Binance API error".to_string());
-        }
-
-        #[derive(serde::Deserialize)]
-        struct BinancePrice {
-            price: String,
-        }
-
-        let data: BinancePrice = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-        data.price
-            .parse::<f64>()
-            .map_err(|e| format!("Failed to parse price: {}", e))
-    }
-
-    /// Execute a trade on Polymarket
     async fn execute_trade(
         db: &Db,
         bot_id: i64,
@@ -198,22 +171,17 @@ impl BotExecutor {
         _confidence: f64,
         private_key: &str,
     ) -> Result<(), String> {
-        // Get Polymarket client
         let pm_client = PolymarketClient::new(private_key)
             .map_err(|e| format!("Failed to create client: {}", e))?;
 
-        // Get market info to get token_id
-        let token_id = market_id; // Use market_id as token_id for now
+        let token_id = market_id;
+        let size = 1.0;
 
-        // Calculate size based on confidence (use fixed size for now, could use Kelly)
-        let size = 1.0; // $1 for now
-
-        // Get current price (use quote)
-        let price = pm_client.get_quote(token_id, "BUY", size)
+        let quote_side = if side == "YES" { "BUY" } else { "SELL" };
+        let price = pm_client.get_quote(token_id, quote_side, size)
             .await
             .unwrap_or(0.5);
 
-        // Check balance
         let balance = pm_client.get_balance().await.unwrap_or(0.0);
         if balance < size * price {
             let msg = format!("Insufficient balance: {} < {}", balance, size * price);
@@ -222,7 +190,6 @@ impl BotExecutor {
             return Ok(());
         }
 
-        // Create and place order
         let _order_request = polymarket::OrderRequest {
             token_id: token_id.to_string(),
             price,
@@ -230,8 +197,6 @@ impl BotExecutor {
             side: if side == "YES" { "BUY".to_string() } else { "SELL".to_string() },
         };
 
-        // Create and sign order (requires API creds)
-        // For now, we can't place real orders without API key creds
         let _order_id = format!("auto_{}", chrono::Utc::now().timestamp_millis());
 
         let msg = format!(
@@ -242,7 +207,6 @@ impl BotExecutor {
         tracing::info!("{}", msg);
         let _ = Self::log_activity(db, user_id, Some(bot_id), "INFO", &msg).await;
 
-        // Record order in database
         let _ = queries::create_order(
             db,
             bot_id,
@@ -256,7 +220,6 @@ impl BotExecutor {
         Ok(())
     }
 
-    /// Log activity to database
     async fn log_activity(
         db: &Db,
         user_id: i64,
@@ -280,67 +243,30 @@ impl BotExecutor {
 }
 
 /// Start a bot by ID
+/// MEGJEGYZÉS: Ez a függvény NEM indítja el a tényleges trading loop-ot.
+/// A valódi indítást az api/bots.rs start_bot() végzi az orchestrator-on keresztül.
+/// Ez a függvény megtartva a kompatibilitás miatt, de nem hívódik meg a normál flow-ban.
 pub async fn start_bot(
     db: &Db,
     bot_id: i64,
     user_id: i64,
 ) -> Result<String, String> {
-    // Get bot config
     let bot = queries::get_bot_by_id(db, bot_id, user_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or("Bot not found")?;
 
-    // Get credentials for private key
-    let settings = queries::get_settings(db, user_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    // FIX: A credential-t a credential_cache-ből kell venni (CachedCredentials),
+    // nem itt decryptálni hardkódolt jelszóval. Ez a függvény elavult.
+    tracing::warn!(
+        "executor::start_bot() called for bot {} - use orchestrator::start_bot() instead",
+        bot_id
+    );
 
-    let (_private_key, _encrypted_blob) = match settings {
-        Some((_, blob)) if !blob.is_empty() => {
-            // Try to decrypt - for now use the known key
-            let password = "techno";
-            let encryption_key = format!("{}_pm_creds", password);
-
-            match crypto::decrypt(&blob, &encryption_key) {
-                Ok(json_str) => {
-                    #[derive(serde::Deserialize)]
-                    struct Creds {
-                        private_key: Option<String>,
-                        key: Option<String>,
-                        secret: Option<String>,
-                        passphrase: Option<String>,
-                    }
-
-                    let creds: Creds = serde_json::from_str(&json_str).unwrap_or(Creds {
-                        private_key: None,
-                        key: None,
-                        secret: None,
-                        passphrase: None,
-                    });
-
-                    (creds.private_key.unwrap_or_else(||
-                        "REMOVED_ADDRESS".to_string()
-                    ), blob)
-                }
-                Err(_) => (
-                    "REMOVED_ADDRESS".to_string(),
-                    blob,
-                )
-            }
-        }
-        _ => (
-            "REMOVED_ADDRESS".to_string(),
-            String::new(),
-        ),
-    };
-
-    // Update bot status to running
     queries::update_bot_status(db, bot_id, user_id, "running")
         .await
         .map_err(|e| e.to_string())?;
 
-    // Log activity
     let msg = format!("Bot '{}' started with strategy '{}'", bot.name, bot.strategy_type);
     let _ = sqlx::query(
         "INSERT INTO activity_log (user_id, bot_id, level, message) VALUES (?, ?, ?, ?)"
@@ -352,7 +278,6 @@ pub async fn start_bot(
     .execute(db.as_ref())
     .await;
 
-    // Start the executor - for now just log that we would start
     tracing::info!("Starting bot {} with strategy {}", bot.name, bot.strategy_type);
 
     Ok(format!("Bot '{}' started successfully", bot.name))
@@ -364,18 +289,15 @@ pub async fn stop_bot(
     bot_id: i64,
     user_id: i64,
 ) -> Result<String, String> {
-    // Update bot status to stopped
     queries::update_bot_status(db, bot_id, user_id, "stopped")
         .await
         .map_err(|e| e.to_string())?;
 
-    // Get bot for logging
     let bot = queries::get_bot_by_id(db, bot_id, user_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or("Bot not found")?;
 
-    // Log activity
     let msg = format!("Bot '{}' stopped", bot.name);
     let _ = sqlx::query(
         "INSERT INTO activity_log (user_id, bot_id, level, message) VALUES (?, ?, ?, ?)"

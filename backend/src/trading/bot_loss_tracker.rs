@@ -107,16 +107,21 @@ impl BotLossTrackerManager {
 
         // 5+ consecutive losses -> very aggressive reduction
         if tracker.consecutive_losses >= 5 {
-            return 0.25;
+            return 0.15;
         }
 
-        // 2 consecutive losses -> 25% of normal size
-        if tracker.consecutive_losses == 2 {
-            return 0.25;
+        // 3-4 consecutive losses -> 30% of normal size
+        if tracker.consecutive_losses >= 3 {
+            return 0.30;
+        }
+
+        // 2 consecutive losses -> 40% of normal size
+        if tracker.consecutive_losses >= 2 {
+            return 0.40;
         }
 
         // 1 consecutive loss -> 50% of normal size
-        if tracker.consecutive_losses == 1 {
+        if tracker.consecutive_losses >= 1 {
             return 0.5;
         }
 

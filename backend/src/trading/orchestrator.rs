@@ -38,9 +38,11 @@ pub enum BotEvent {
 pub struct PendingBet {
     pub side: String,
     pub bet_size: f64,
-    pub start_price: f64,
-    pub entry_price: f64,
+    pub start_price: f64,   // BTC ár fogadás nyitásakor
+    pub entry_price: f64,   // YES/NO token ára (0-1)
     pub decision_id: i64,
+    pub price_to_beat: Option<f64>, // Polymarket settlement küszöb
+    pub market_end_time: i64,       // Mikor zár a piac (unix timestamp)
 }
 
 #[derive(Debug, Clone)]
@@ -223,7 +225,14 @@ impl BotOrchestrator {
         }
 
         let all_markets = fetch_active_markets("5").await;
-        let market = if let Some(m) = all_markets.first() { m.clone() } else { return Ok(()); };
+        // FIX: Minden bot különböző piacot kap, bot_id alapján round-robin elosztással.
+        // Ha nincs elég piac, az első piacon osztoznak.
+        let market = if all_markets.is_empty() {
+            return Ok(());
+        } else {
+            let idx = (bot_id as usize) % all_markets.len();
+            all_markets[idx].clone()
+        };
         let btc_price = self.fetch_btc_price().await?;
         
         // Calculate BTC change and velocity/acceleration from price history
@@ -233,7 +242,7 @@ impl BotOrchestrator {
         {
             let now = Instant::now();
             rb.btc_price_history.push((btc_price, now));
-            let cutoff = now - Duration::from_secs(30);
+            let cutoff = now - Duration::from_secs(60);
             rb.btc_price_history.retain(|(_, t)| *t > cutoff);
             
             if rb.btc_price_history.len() >= 2 {
@@ -277,26 +286,31 @@ impl BotOrchestrator {
         if market_changed || market_ended {
             if let Some(ref bet) = rb.pending_bet {
                 let diff = (btc_price - bet.start_price) / bet.start_price;
-                
-                let btc_market_correlation = 0.65;
-                let won = if bet.side == "YES" { 
-                    diff > 0.0 && rand::random::<f64>() < btc_market_correlation
-                } else { 
-                    diff < 0.0 && rand::random::<f64>() < btc_market_correlation
+
+                // Helyes Polymarket settlement logika:
+                // Ha van price_to_beat: YES nyer ha final BTC >= price_to_beat
+                // Ha nincs: fallback a BTC irány alapján
+                let won = if let Some(ptb) = bet.price_to_beat {
+                    if bet.side == "YES" { btc_price >= ptb } else { btc_price < ptb }
+                } else {
+                    let min_diff = 0.0001_f64;
+                    if bet.side == "YES" { diff > min_diff } else { diff < -min_diff }
                 };
                 
-                let profit_only = bet.bet_size * (1.0 - bet.entry_price);
+                let effective_cost = if bet.side == "YES" { bet.entry_price } else { 1.0 - bet.entry_price };
+                let profit_if_won = bet.bet_size * (1.0 - effective_cost);
                 let polymarket_fee_rate = 0.02;
                 let settlement_credit = if won {
-                    (bet.bet_size + profit_only) * (1.0 - polymarket_fee_rate)
+                    // Collateral returned + (profit minus 2% Polymarket fee)
+                    bet.bet_size * effective_cost + profit_if_won * (1.0 - polymarket_fee_rate)
                 } else {
                     0.0
                 };
                 
                 let pnl_for_stats = if won { 
-                    profit_only * (1.0 - polymarket_fee_rate) 
+                    profit_if_won * (1.0 - polymarket_fee_rate) 
                 } else { 
-                    -bet.bet_size 
+                    -(bet.bet_size * effective_cost) 
                 };
                 
                 queries::record_paper_settlement(&self.db, bot_id, bet.decision_id, won, settlement_credit, pnl_for_stats).await.ok();
@@ -328,7 +342,15 @@ impl BotOrchestrator {
             time_remaining: market.time_remaining,
             btc_velocity: btc_velocity,
             btc_acceleration: btc_acceleration,
-            btc_volatility: btc_acceleration.map(|a| a.abs()),
+            btc_volatility: if rb.btc_price_history.len() >= 3 {
+                let prices: Vec<f64> = rb.btc_price_history.iter().map(|(p, _)| *p).collect();
+                let returns: Vec<f64> = prices.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
+                let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+                let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+                Some(variance.sqrt())
+            } else {
+                None
+            },
         };
 
         let signal = rb.strategy.evaluate_with_context(ctx);
@@ -344,7 +366,8 @@ impl BotOrchestrator {
             
             if rb.pending_bet.is_none() {
                 let outcome = if matches!(signal, Signal::Yes(_)) { "YES" } else { "NO" };
-                let price = if outcome == "YES" { market.yes_price } else { market.no_price };
+                let price = market.yes_price;
+                let effective_cost = if outcome == "YES" { price } else { 1.0 - price };
 
                 let (can_trade, block_reason) = {
                     let mut rm = self.risk_manager.write().await;
@@ -380,11 +403,19 @@ impl BotOrchestrator {
                             .map(|p| p.balance)
                             .unwrap_or(portfolio.balance);
                         
-                        queries::update_portfolio_balance(&self.db, bot_id, fresh_balance - bot.bet_size).await.ok();
+                        queries::update_portfolio_balance(&self.db, bot_id, fresh_balance - bot.bet_size * effective_cost).await.ok();
                         eprintln!("[BET] Bot {}: {} ${:.2} @ {:.2} | balance: {:.2} → {:.2}",
-                            bot_id, outcome, bot.bet_size, price, fresh_balance, fresh_balance - bot.bet_size);
+                            bot_id, outcome, bot.bet_size, price, fresh_balance, fresh_balance - bot.bet_size * effective_cost);
                         
-                        rb.pending_bet = Some(PendingBet { side: outcome.to_string(), bet_size: bot.bet_size, start_price: btc_price, entry_price: price, decision_id: d_id });
+                        rb.pending_bet = Some(PendingBet {
+                            side: outcome.to_string(),
+                            bet_size: bot.bet_size,
+                            start_price: btc_price,
+                            entry_price: price,
+                            decision_id: d_id,
+                            price_to_beat: market.price_to_beat,
+                            market_end_time: market.end_time,
+                        });
                         rb.last_trade_time = Some(Instant::now());
                         
                         self.event_sender.send(BotEvent::PositionUpdate { bot_id, side: outcome.to_string(), size: bot.bet_size, price, unrealized_pnl: 0.0 }).ok();
@@ -396,15 +427,21 @@ impl BotOrchestrator {
         rb.last_btc_price = Some(btc_price);
         
         if let Some(last_trade) = rb.last_trade_time {
-            if last_trade.elapsed() < Duration::from_secs(30) {
+            if last_trade.elapsed() < Duration::from_secs(15) {
                 let mut running = self.running_bots.write().await;
-                running.insert(bot_id, rb);
+                // Check if bot was stopped during processing (race condition fix)
+                if running.contains_key(&bot_id) {
+                    running.insert(bot_id, rb);
+                }
                 return Ok(());
             }
         }
         
         let mut running = self.running_bots.write().await;
-        running.insert(bot_id, rb);
+        // Check if bot was stopped during processing (race condition fix)
+        if running.contains_key(&bot_id) {
+            running.insert(bot_id, rb);
+        }
         Ok(())
     }
 
@@ -417,7 +454,53 @@ impl BotOrchestrator {
 
     async fn place_order(market: &crate::api::market::ActiveMarket, outcome: &str, bet_size: f64, creds: &CachedCredentials) -> Result<String, String> {
         let order_price = if outcome == "YES" { (market.yes_price * 1.0001).min(0.99) } else { ((1.0 - market.yes_price) * 1.0001).min(0.99) };
-        Ok("order_id_simulated".to_string())
+
+        // Create PolymarketClient from credentials
+        let client = match PolymarketClient::from_api_credentials(
+            &creds.private_key,
+            creds.signature_type,
+            Some(crate::trading::polymarket::ApiKeyCreds {
+                key: creds.api_key.clone(),
+                secret: creds.api_secret.clone(),
+                passphrase: creds.api_passphrase.clone(),
+            }),
+            creds.funder.as_deref(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to create PolymarketClient for live order: {}", e);
+                return Err(format!("Failed to create client: {}", e));
+            }
+        };
+
+        let token_id = if outcome == "YES" { market.yes_token_id.clone() } else { market.no_token_id.clone() };
+        let side = if outcome == "YES" { "BUY" } else { "SELL" };
+
+        // Sign and post the order
+        match client.create_order(&OrderRequest {
+            token_id,
+            price: order_price,
+            size: bet_size,
+            side: side.to_string(),
+        }).await {
+            Ok(signed_order) => {
+                match client.post_order(&signed_order).await {
+                    Ok(response) => {
+                        let order_id = response.order_id.unwrap_or_else(|| "unknown".to_string());
+                        tracing::info!("Live order placed: id={}, outcome={}, size={}, price={}", order_id, outcome, bet_size, order_price);
+                        Ok(order_id)
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to post order: {}", e);
+                        Err(format!("Failed to post order: {}", e))
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to create order: {}", e);
+                Err(format!("Failed to create order: {}", e))
+            }
+        }
     }
 
     pub async fn is_running(&self, bot_id: i64) -> bool {
@@ -439,6 +522,13 @@ impl BotOrchestrator {
     }
 
     pub async fn auto_save_sessions(&self) -> Result<(), String> {
+        let running = self.running_bots.read().await;
+        let bot_count = running.len();
+        let pending_count = running.values().filter(|rb| rb.pending_bet.is_some()).count();
+        if pending_count > 0 {
+            tracing::debug!("Auto-save: {} running bots, {} with pending bets", bot_count, pending_count);
+        }
+        drop(running);
         Ok(())
     }
 

@@ -173,7 +173,7 @@ impl LiveExecutionAdapter {
         let db = &self.db;
 
         // Get bot config
-        let bot = crate::db::queries::get_bot_by_id(db, intent.bot_id, intent.user_id)
+        let _bot = crate::db::queries::get_bot_by_id(db, intent.bot_id, intent.user_id)
             .await
             .map_err(|e| e.to_string())?
             .ok_or("Bot not found")?;

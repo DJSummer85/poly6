@@ -234,9 +234,16 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .ok(); // Ignore error if column already exists
 
     // bot_runs - complete run tracking with mode and balance
+    // Index for faster position lookups by market
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_positions_market_id ON positions(market_id)")
+        .execute(pool)
+        .await?;
+
     sqlx::query(
         r#"
-        CREATE TABLE IF NOT EXISTS bot_runs (
+        
+
+    CREATE TABLE IF NOT EXISTS bot_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             bot_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,

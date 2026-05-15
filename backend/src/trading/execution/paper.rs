@@ -4,7 +4,6 @@
 use crate::db::Db;
 use crate::db::queries;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Paper execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,7 +177,7 @@ impl PaperExecutionAdapter {
         let max_bet = balance * 0.25;
 
         // Check if bet size would exceed max
-        let default_size = 1.0;
+        let default_size = bot.bet_size.max(0.1);
         if default_size > max_bet {
             return Ok(RiskCheckResult {
                 approved: false,
@@ -254,22 +253,24 @@ impl PaperExecutionAdapter {
         // Find position for this market
         if let Some(pos) = positions.iter().find(|p| p.market_id == market_id) {
             // Update existing position
-            let new_size = if pos.side == side {
-                pos.size + size
+            let (new_size, new_side) = if pos.side == side {
+                (pos.size + size, pos.side.clone())
             } else {
                 // Opposite side - reduce or flip
                 if pos.size > size {
-                    pos.size - size
+                    (pos.size - size, pos.side.clone())
                 } else {
-                    size - pos.size
+                    // Position flips to the new side
+                    (size - pos.size, side.to_string())
                 }
             };
 
             if new_size > 0.0 {
                 sqlx::query(
-                    "UPDATE positions SET size = ?, avg_price = ? WHERE id = ?"
+                    "UPDATE positions SET size = ?, side = ?, avg_price = ? WHERE id = ?"
                 )
                 .bind(new_size)
+                .bind(&new_side)
                 .bind(price)
                 .bind(pos.id)
                 .execute(db.as_ref())
@@ -312,7 +313,7 @@ impl PaperExecutionAdapter {
         user_id: i64,
         size: f64,
         price: f64,
-        side: &str,
+        _side: &str,
     ) -> Result<(), String> {
         let cost = size * price;
 

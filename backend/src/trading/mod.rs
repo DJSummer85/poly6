@@ -15,4 +15,4 @@ pub mod settlement;
 
 pub use binance::client::btc_price_stream;
 pub use binance::client::BinanceClient;
-pub use polymarket::{check_matic_balance, PolymarketClient};
+pub use polymarket::PolymarketClient;

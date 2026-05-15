@@ -20,16 +20,47 @@ interface Bot {
   id: string; name: string; strategy_type: string; status: BotStatus;
   trading_mode: 'paper' | 'live'; bet_size: number; stop_loss: number;
   take_profit: number; market_id: string; history?: TradeResult[];
+  // Számlálók indítási időpontjai
+  runSince?: number;      // timestamp (ms), mióta fut folyamatosan
+  posSince?: number;      // timestamp (ms), mióta van pozícióban
   portfolio?: {
     balance: number; initial_balance: number; total_pnl: number;
     total_trades: number; winning_trades: number; losing_trades: number;
     win_rate: number; open_positions: number;
+    unrealized_pnl: number;       // backend küldi, pozíció jelzéshez
+    total_position_value: number; // backend küldi, pozíció jelzéshez
   }
 }
 
 const STRATEGY_COLORS: Record<string, string> = {
   momentum: '#818cf8', mean_reversion: '#34d399', last_seconds_scalp: '#f472b6',
   binance_signal: '#38bdf8', scalping: '#fb923c'
+}
+
+// ---- Időformázó segédfüggvény ----
+function formatElapsed(ms: number): string {
+  const totalSec = Math.floor(ms / 1000)
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  if (h > 0) return `${h}ó ${m}p ${s}mp`
+  if (m > 0) return `${m}p ${s}mp`
+  return `${s}mp`
+}
+
+// ---- Élő időszámláló hook ----
+function useElapsedTimer(startTs: number | undefined): string {
+  const [elapsed, setElapsed] = useState<string>('—')
+
+  useEffect(() => {
+    if (!startTs) { setElapsed('—'); return }
+    const update = () => setElapsed(formatElapsed(Date.now() - startTs))
+    update()
+    const id = setInterval(update, 1000)
+    return () => clearInterval(id)
+  }, [startTs])
+
+  return elapsed
 }
 
 export default function BotsPage() {
@@ -55,11 +86,15 @@ export default function BotsPage() {
   }, [])
 
   // POZÍCIÓ ELLENŐRZÉSE
+  // Háromféle jelzés alapján: open_positions, unrealized_pnl, total_position_value
+  // Demo módban a Polymarket API nem elérhető, ezért az unrealized_pnl és
+  // total_position_value mezőket is figyelembe vesszük
   const checkPosition = (bot: Bot) => {
-    if (!bot.portfolio) return false;
-    if (bot.portfolio.open_positions > 0) return true;
-    if (bot.status === 'running' && Math.abs(bot.portfolio.balance - bot.portfolio.initial_balance) > 0.01) return true;
-    return false;
+    if (!bot.portfolio) return false
+    if ((bot.portfolio.open_positions ?? 0) > 0) return true
+    if (Math.abs(bot.portfolio.unrealized_pnl ?? 0) > 0.001) return true
+    if ((bot.portfolio.total_position_value ?? 0) > 0.001) return true
+    return false
   }
 
   const loadBots = useCallback(async () => {
@@ -87,6 +122,36 @@ export default function BotsPage() {
               addLog(`${newBot.name}: ${isWin ? 'NYERTES' : 'VESZTES'} trade ($${Math.abs(diff).toFixed(2)})`, isWin ? 'success' : 'warn')
             } else { newBot.history = oldBot.history }
           }
+
+          // ---- FUTÁSI IDŐ SZÁMLÁLÓ logika ----
+          if (oldBot) {
+            if (oldBot.status !== 'running' && newBot.status === 'running') {
+              newBot.runSince = Date.now()
+            } else if (newBot.status === 'running') {
+              newBot.runSince = oldBot.runSince
+            } else {
+              newBot.runSince = undefined
+            }
+
+            // ---- POZÍCIÓ IDŐ SZÁMLÁLÓ logika ----
+            const wasInPos = checkPosition(oldBot as Bot)
+            const isNowInPos = checkPosition(newBot as Bot)
+            if (!wasInPos && isNowInPos) {
+              newBot.posSince = Date.now()
+            } else if (isNowInPos) {
+              newBot.posSince = oldBot.posSince
+            } else {
+              newBot.posSince = undefined
+            }
+          } else {
+            if (newBot.status === 'running') newBot.runSince = Date.now()
+            if (checkPosition(newBot as Bot)) newBot.posSince = Date.now()
+          }
+        })
+      } else {
+        withPortfolio.forEach((bot) => {
+          if (bot.status === 'running') bot.runSince = Date.now()
+          if (checkPosition(bot as Bot)) bot.posSince = Date.now()
         })
       }
 
@@ -196,7 +261,6 @@ export default function BotsPage() {
           <input type="text" placeholder="Bot keresése..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: '100%', padding: '10px 10px 10px 38px', background: '#13131f', border: '1px solid #252535', borderRadius: '10px', color: '#fff', outline: 'none', fontSize: '13px' }} />
         </div>
 
-        {/* RENDEZÉS LEGÖRDÜLŐ MENÜ */}
         <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
           <select
             value={sortKey}
@@ -269,6 +333,10 @@ function BotCard({ bot, isInPos, onAction, onDelete, isLoading }: any) {
   const pnl = bot.portfolio?.total_pnl || 0; const balance = bot.portfolio?.balance || 0;
   const strategyColor = STRATEGY_COLORS[bot.strategy_type] || '#818cf8'
 
+  // ---- ÉLŐ SZÁMLÁLÓK ----
+  const runElapsed = useElapsedTimer(bot.runSince)
+  const posElapsed = useElapsedTimer(bot.posSince)
+
   return (
     <motion.div layout style={{
       background: '#13131f', border: isInPos ? '1.5px solid #22c55e' : '1px solid #252535',
@@ -281,6 +349,39 @@ function BotCard({ bot, isInPos, onAction, onDelete, isLoading }: any) {
         <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: bot.status === 'running' ? '#22c55e' : '#4b5563' }} />
       </div>
       <span style={{ fontSize: '8px', fontWeight: 800, color: strategyColor, background: `${strategyColor}15`, padding: '2px 6px', borderRadius: '4px', alignSelf: 'flex-start' }}>{bot.strategy_type.toUpperCase()}</span>
+
+      {/* ---- SZÁMLÁLÓK BLOKK ---- */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px' }}>
+        {/* Futási idő számláló */}
+        <div style={{
+          background: bot.status === 'running' ? 'rgba(99,102,241,0.08)' : '#0d0d1a',
+          border: `1px solid ${bot.status === 'running' ? '#3b3bff40' : '#1e1e30'}`,
+          borderRadius: '8px', padding: '6px 8px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
+            <Clock size={9} color={bot.status === 'running' ? '#818cf8' : '#4b5563'} />
+            <span style={{ fontSize: '7px', fontWeight: 800, color: bot.status === 'running' ? '#818cf8' : '#4b5563', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Fut</span>
+          </div>
+          <span style={{ fontSize: '10px', fontWeight: 700, color: bot.status === 'running' ? '#a5b4fc' : '#4b5563', fontVariantNumeric: 'tabular-nums' }}>
+            {bot.status === 'running' ? runElapsed : '—'}
+          </span>
+        </div>
+
+        {/* Pozíció idő számláló */}
+        <div style={{
+          background: isInPos ? 'rgba(34,197,94,0.08)' : '#0d0d1a',
+          border: `1px solid ${isInPos ? '#22c55e40' : '#1e1e30'}`,
+          borderRadius: '8px', padding: '6px 8px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
+            <Zap size={9} color={isInPos ? '#22c55e' : '#4b5563'} />
+            <span style={{ fontSize: '7px', fontWeight: 800, color: isInPos ? '#22c55e' : '#4b5563', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Pozíció</span>
+          </div>
+          <span style={{ fontSize: '10px', fontWeight: 700, color: isInPos ? '#4ade80' : '#4b5563', fontVariantNumeric: 'tabular-nums' }}>
+            {isInPos ? posElapsed : '—'}
+          </span>
+        </div>
+      </div>
 
       <div style={{ background: '#0d0d1a', padding: '10px', borderRadius: '12px', border: '1px solid #1e1e30' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}><span style={{ fontSize: '8px', color: '#4b5563', fontWeight: 700 }}>EGYENLEG</span><span style={{ fontSize: '12px', fontWeight: 700 }}>${balance.toFixed(2)}</span></div>

@@ -4,9 +4,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use tokio::sync::{RwLock, mpsc};
-use tokio::time::{interval, Duration};
+use tokio::time::interval;
 
 use crate::db::Db;
 use crate::db::queries;
@@ -56,6 +56,7 @@ pub struct RunningBot {
     pub current_balance: f64,
     pub pending_bet: Option<PendingBet>,
     pub btc_price_history: Vec<(f64, Instant)>,
+    pub last_trade_time: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -70,7 +71,6 @@ pub struct BotOrchestrator {
 }
 
 /// Restore running bots from database on startup
-/// This is called once at startup to restore any bots that were running before the server stopped
 pub async fn restore_running_bots(orchestrator: Arc<BotOrchestrator>) {
     tracing::info!("Restoring running bots from database...");
 
@@ -90,7 +90,6 @@ pub async fn restore_running_bots(orchestrator: Arc<BotOrchestrator>) {
     tracing::info!("Found {} running sessions to restore", running_sessions.len());
 
     for session in &running_sessions {
-        // Get bot config for this session
         let bot = match queries::get_bot_by_id(&orchestrator.db, session.bot_id, session.user_id).await {
             Ok(Some(b)) => b,
             Ok(None) => {
@@ -103,10 +102,8 @@ pub async fn restore_running_bots(orchestrator: Arc<BotOrchestrator>) {
             }
         };
 
-        // Recreate strategy executor from bot config
         let strategy = StrategyExecutor::new(&bot.strategy_type, &bot.params);
 
-        // Recreate running bot state
         let running_bot = RunningBot {
             bot_id: bot.id,
             session_id: session.id,
@@ -119,9 +116,9 @@ pub async fn restore_running_bots(orchestrator: Arc<BotOrchestrator>) {
             current_balance: session.start_balance,
             pending_bet: None,
             btc_price_history: Vec::new(),
+            last_trade_time: None,
         };
 
-        // Insert into running_bots map
         {
             let mut running = orchestrator.running_bots.write().await;
             running.insert(bot.id, running_bot);
@@ -129,8 +126,6 @@ pub async fn restore_running_bots(orchestrator: Arc<BotOrchestrator>) {
 
         tracing::info!("Restored bot {} (session {}) with balance {:.2}", bot.id, session.id, session.start_balance);
 
-        // Start the orchestrator loop for this restored bot
-        // Copy values needed for the async task (session fields must outlive the await)
         let orchestrator_clone = orchestrator.clone();
         let bot_id = bot.id;
         let session_user_id = session.user_id;
@@ -139,7 +134,7 @@ pub async fn restore_running_bots(orchestrator: Arc<BotOrchestrator>) {
                 orchestrator_clone,
                 bot_id,
                 session_user_id,
-                5, // 5 second interval
+                5,
                 None,
             ).await;
         });
@@ -170,6 +165,7 @@ impl BotOrchestrator {
             bot_id: bot.id, session_id, user_id: bot.user_id, strategy, last_market_slug: None,
             consecutive_errors: 0, last_btc_price: None, btc_window_open: None, current_balance,
             pending_bet: None, btc_price_history: Vec::new(),
+            last_trade_time: None,
         });
         self.event_sender.send(BotEvent::SessionStarted { bot_id: bot.id, session_id, bot_name: bot.name.clone() }).ok();
         Ok(session_id)
@@ -186,6 +182,7 @@ impl BotOrchestrator {
             bot_id: bot.id, session_id, user_id: bot.user_id, strategy: StrategyExecutor::new(&bot.strategy_type, &bot.params), 
             last_market_slug: None, consecutive_errors: 0, last_btc_price: None, btc_window_open: None, 
             current_balance: initial_balance, pending_bet: None, btc_price_history: Vec::new(),
+            last_trade_time: None,
         });
         self.event_sender.send(BotEvent::SessionStarted { bot_id: bot.id, session_id, bot_name: bot.name.clone() }).ok();
         tracing::info!("Bot {} started (session {}), trading_mode={}", bot.id, session_id, bot.trading_mode);
@@ -203,18 +200,24 @@ impl BotOrchestrator {
 
     pub async fn execute_cycle(&self, bot_id: i64, user_id: i64, credential_cache: Option<Arc<RwLock<HashMap<i64, CachedCredentials>>>>) -> Result<(), String> {
         let running_bot = { let running = self.running_bots.read().await; running.get(&bot_id).cloned() };
-        let mut rb = if let Some(b) = running_bot { b } else { 
+        let mut rb = if let Some(b) = running_bot {
+            b
+        } else {
             eprintln!("[DEBUG] Bot {} not in running_bots map, skipping cycle", bot_id);
-            return Ok(()); 
+            return Ok(());
         };
-
         let bot = queries::get_bot_by_id(&self.db, bot_id, user_id).await.map_err(|e| e.to_string())?.ok_or("Bot not found")?;
         let portfolio = queries::get_portfolio(&self.db, bot_id, user_id).await.map_err(|e| e.to_string())?.ok_or("No portfolio")?;
 
-        eprintln!("[DEBUG] Bot {} cycle: portfolio.balance={}, trading_mode={}", bot_id, portfolio.balance, bot.trading_mode);
-
         // --- STOP LOSS 30% ---
-        if portfolio.balance <= portfolio.initial_balance * 0.7 {
+        let fresh_balance_for_stop = queries::get_portfolio(&self.db, bot_id, user_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.balance)
+            .unwrap_or(portfolio.balance);
+        if fresh_balance_for_stop <= portfolio.initial_balance * 0.7 {
+            tracing::warn!("Bot {} hit stop-loss: balance={:.2}, initial={:.2}", bot_id, fresh_balance_for_stop, portfolio.initial_balance);
             self.stop_bot(bot_id, user_id).await?;
             return Ok(());
         }
@@ -230,63 +233,85 @@ impl BotOrchestrator {
         {
             let now = Instant::now();
             rb.btc_price_history.push((btc_price, now));
-            // Keep only last 30 seconds of history for velocity calc
             let cutoff = now - Duration::from_secs(30);
             rb.btc_price_history.retain(|(_, t)| *t > cutoff);
             
             if rb.btc_price_history.len() >= 2 {
-                // Change from oldest in window
-                let oldest = rb.btc_price_history.first().map(|(p, _)| *p).unwrap_or(btc_price);
-                btc_change = Some((btc_price - oldest) / oldest);
+                let oldest_price = rb.btc_price_history.first().map(|(p, _)| *p).unwrap_or(btc_price);
+                btc_change = Some((btc_price - oldest_price) / oldest_price);
                 
-                // Velocity: % change per second over window
-                let duration_secs = rb.btc_price_history.last().map(|(_, t)| t.elapsed().as_secs_f64()).unwrap_or(1.0).max(1.0);
+                let first_instant = rb.btc_price_history.first().map(|(_, t)| *t).unwrap();
+                let last_instant = rb.btc_price_history.last().map(|(_, t)| *t).unwrap();
+                let duration_secs = (last_instant - first_instant).as_secs_f64().max(1.0);
+                
                 btc_velocity = Some(btc_change.unwrap() / duration_secs);
                 
-                // Acceleration: change in velocity (simplified)
                 if rb.btc_price_history.len() >= 3 {
-                    let oldest2 = rb.btc_price_history[rb.btc_price_history.len()/2].0;
-                    let mid_change = (oldest2 - oldest) / oldest;
-                    let mid_duration = duration_secs / 2.0;
-                    let prev_velocity = mid_change / mid_duration.max(1.0);
-                    btc_acceleration = Some((btc_velocity.unwrap() - prev_velocity) / mid_duration.max(1.0));
+                    let mid_idx = rb.btc_price_history.len() / 2;
+                    let mid_price = rb.btc_price_history[mid_idx].0;
+                    let mid_instant = rb.btc_price_history[mid_idx].1;
+                    
+                    let first_to_mid_secs = (mid_instant - first_instant).as_secs_f64().max(1.0);
+                    let mid_to_last_secs = (last_instant - mid_instant).as_secs_f64().max(1.0);
+                    
+                    let velocity_first_half = (mid_price - oldest_price) / oldest_price / first_to_mid_secs;
+                    let velocity_second_half = (btc_price - mid_price) / mid_price / mid_to_last_secs;
+                    
+                    btc_acceleration = Some((velocity_second_half - velocity_first_half) / (duration_secs / 2.0).max(1.0));
                 } else {
                     btc_acceleration = Some(0.0);
                 }
             } else {
-                // Fallback to last_btc_price
                 btc_change = rb.last_btc_price.map(|last| (btc_price - last) / last);
                 btc_velocity = btc_change;
                 btc_acceleration = Some(0.0);
             }
         }
         
-        let market_slug = format!("btc-updown-5m-{}", market.end_time);
-        
+        let market_slug = market.condition_id.clone();
         self.event_sender.send(BotEvent::Scanning { bot_id, market_slug: market_slug.clone() }).ok();
 
-        // Settlement: check if market transitioned OR if time is up
         let market_ended = market.time_remaining <= 5;
         let market_changed = rb.last_market_slug.as_ref() != Some(&market_slug);
         
         if market_changed || market_ended {
-            // Settlement paper trade
             if let Some(ref bet) = rb.pending_bet {
                 let diff = (btc_price - bet.start_price) / bet.start_price;
-                // FIXED: won logic - YES bet wins if BTC goes UP, NO bet wins if BTC goes DOWN
-                let won = if bet.side == "YES" { diff > 0.0 } else { diff < 0.0 };
-                // PnL: if won, you get back your bet_size + profit; if lost, you lose your bet_size
-                // profit = bet_size * (1.0 - entry_price) / entry_price (for YES) or (entry_price) for NO?
-                // Actually: YES pays (1/yes_price - 1) * bet_size, NO pays (1/no_price - 1) * bet_size
-                // For simplicity: WIN = +bet_size * (1 - entry_price), LOSE = -bet_size
-                let profit = if won { bet.bet_size * (1.0 - bet.entry_price) } else { -bet.bet_size };
-                queries::record_paper_settlement(&self.db, bot_id, bet.decision_id, won, profit).await.ok();
-                self.event_sender.send(BotEvent::TradeResult { bot_id, won, pnl: profit }).ok();
-                eprintln!("[SETTLE] Bot {}: {} won={} profit={:.4} price_diff={:.6}", bot_id, bet.side, won, profit, diff);
+                
+                let btc_market_correlation = 0.65;
+                let won = if bet.side == "YES" { 
+                    diff > 0.0 && rand::random::<f64>() < btc_market_correlation
+                } else { 
+                    diff < 0.0 && rand::random::<f64>() < btc_market_correlation
+                };
+                
+                let profit_only = bet.bet_size * (1.0 - bet.entry_price);
+                let polymarket_fee_rate = 0.02;
+                let settlement_credit = if won {
+                    (bet.bet_size + profit_only) * (1.0 - polymarket_fee_rate)
+                } else {
+                    0.0
+                };
+                
+                let pnl_for_stats = if won { 
+                    profit_only * (1.0 - polymarket_fee_rate) 
+                } else { 
+                    -bet.bet_size 
+                };
+                
+                queries::record_paper_settlement(&self.db, bot_id, bet.decision_id, won, settlement_credit, pnl_for_stats).await.ok();
+                self.event_sender.send(BotEvent::TradeResult { bot_id, won, pnl: pnl_for_stats }).ok();
+                eprintln!("[SETTLE] Bot {}: {} won={} credit={:.4} pnl={:.4} price_diff={:.6}",
+                    bot_id, bet.side, won, settlement_credit, pnl_for_stats, diff);
+
+                {
+                    let mut rm = self.risk_manager.write().await;
+                    rm.record_trade_result(bot_id, won);
+                }
+
                 rb.pending_bet = None;
             }
             
-            // Reset window on market change
             if market_changed {
                 rb.btc_window_open = Some(btc_price);
                 rb.last_market_slug = Some(market_slug.clone());
@@ -306,44 +331,78 @@ impl BotOrchestrator {
             btc_volatility: btc_acceleration.map(|a| a.abs()),
         };
 
-        // Javítva: evaluate_with_context használata evaluate_decision helyett
         let signal = rb.strategy.evaluate_with_context(ctx);
         eprintln!("[SIGNAL] Bot {} signal: {:?}", bot_id, signal);
 
-        // Debug logging for signal evaluation
         tracing::debug!(
             "Bot {} cycle: btc_price={}, btc_change={:?}, time_remaining={}, yes_price={}, window_open={:?}, signal={:?}",
             bot_id, btc_price, btc_change, market.time_remaining, market.yes_price, rb.btc_window_open, signal
         );
 
-        // Javítva: Signal enum mintaillesztés és eseményküldés
         if let Signal::Yes(conf) | Signal::No(conf) = signal {
             tracing::info!("Bot {} generated signal: {:?} (confidence: {})", bot_id, signal, conf);
             
             if rb.pending_bet.is_none() {
-                // Javítva: Signal::Yes(_) használata a matches!-ben
                 let outcome = if matches!(signal, Signal::Yes(_)) { "YES" } else { "NO" };
                 let price = if outcome == "YES" { market.yes_price } else { market.no_price };
-                
-                self.event_sender.send(BotEvent::TradeDecision { bot_id, outcome: outcome.to_string(), confidence: conf, bet_size: bot.bet_size, reason: "Signal detected".into() }).ok();
-                
-                if bot.trading_mode == "live" {
-                    if let Some(ref cache) = credential_cache {
-                        let c = cache.read().await;
-                        if let Some(creds) = c.get(&user_id) {
-                            let _ = Self::place_order(&market, outcome, bot.bet_size, creds).await;
-                        }
-                    }
+
+                let (can_trade, block_reason) = {
+                    let mut rm = self.risk_manager.write().await;
+                    rm.can_open_position(
+                        bot_id,
+                        bot.bet_size,
+                        conf,
+                        fresh_balance_for_stop,
+                        portfolio.initial_balance,
+                    )
+                };
+
+                if !can_trade {
+                    tracing::info!("[RISK] Bot {} blocked: {:?}", bot_id, block_reason);
+                    eprintln!("[RISK] Bot {} blocked: {:?}", bot_id, block_reason);
                 } else {
-                    let d_id = queries::log_trade_decision(&self.db, bot_id, rb.session_id, user_id, &market_slug, &market.condition_id, outcome, &bot.strategy_type, conf, Some(btc_price), btc_change, Some(market.yes_price), Some(market.no_price), Some(market.time_remaining), "paper trade").await.unwrap_or(0);
-                    queries::update_portfolio_balance(&self.db, bot_id, portfolio.balance - bot.bet_size).await.ok();
-                    rb.pending_bet = Some(PendingBet { side: outcome.to_string(), bet_size: bot.bet_size, start_price: btc_price, entry_price: price, decision_id: d_id });
-                    self.event_sender.send(BotEvent::PositionUpdate { bot_id, side: outcome.to_string(), size: bot.bet_size, price, unrealized_pnl: 0.0 }).ok();
+                    self.event_sender.send(BotEvent::TradeDecision { bot_id, outcome: outcome.to_string(), confidence: conf, bet_size: bot.bet_size, reason: "Signal detected".into() }).ok();
+                    
+                    if bot.trading_mode == "live" {
+                        if let Some(ref cache) = credential_cache {
+                            let c = cache.read().await;
+                            if let Some(creds) = c.get(&user_id) {
+                                let _ = Self::place_order(&market, outcome, bot.bet_size, creds).await;
+                            }
+                        }
+                    } else {
+                        let d_id = queries::log_trade_decision(&self.db, bot_id, rb.session_id, user_id, &market_slug, &market.condition_id, outcome, &bot.strategy_type, conf, Some(btc_price), btc_change, Some(market.yes_price), Some(market.no_price), Some(market.time_remaining), "paper trade").await.unwrap_or(0);
+                        
+                        let fresh_balance = queries::get_portfolio(&self.db, bot_id, user_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|p| p.balance)
+                            .unwrap_or(portfolio.balance);
+                        
+                        queries::update_portfolio_balance(&self.db, bot_id, fresh_balance - bot.bet_size).await.ok();
+                        eprintln!("[BET] Bot {}: {} ${:.2} @ {:.2} | balance: {:.2} → {:.2}",
+                            bot_id, outcome, bot.bet_size, price, fresh_balance, fresh_balance - bot.bet_size);
+                        
+                        rb.pending_bet = Some(PendingBet { side: outcome.to_string(), bet_size: bot.bet_size, start_price: btc_price, entry_price: price, decision_id: d_id });
+                        rb.last_trade_time = Some(Instant::now());
+                        
+                        self.event_sender.send(BotEvent::PositionUpdate { bot_id, side: outcome.to_string(), size: bot.bet_size, price, unrealized_pnl: 0.0 }).ok();
+                    }
                 }
             }
         }
 
         rb.last_btc_price = Some(btc_price);
+        
+        if let Some(last_trade) = rb.last_trade_time {
+            if last_trade.elapsed() < Duration::from_secs(30) {
+                let mut running = self.running_bots.write().await;
+                running.insert(bot_id, rb);
+                return Ok(());
+            }
+        }
+        
         let mut running = self.running_bots.write().await;
         running.insert(bot_id, rb);
         Ok(())
@@ -361,22 +420,69 @@ impl BotOrchestrator {
         Ok("order_id_simulated".to_string())
     }
 
-    pub async fn is_running(&self, bot_id: i64) -> bool { self.running_bots.read().await.contains_key(&bot_id) }
-    pub async fn get_all_running_bots(&self) -> Vec<i64> { self.running_bots.read().await.keys().copied().collect() }
-    pub async fn get_running_bots(&self, user_id: i64) -> Vec<i64> { self.running_bots.read().await.iter().filter(|(_, b)| b.user_id == user_id).map(|(id, _)| *id).collect() }
+    pub async fn is_running(&self, bot_id: i64) -> bool {
+        self.running_bots.read().await.contains_key(&bot_id)
+    }
+
+    pub async fn get_all_running_bots(&self) -> Vec<i64> {
+        self.running_bots.read().await.keys().copied().collect()
+    }
+
+    pub async fn get_running_bots(&self, user_id: i64) -> Vec<i64> {
+        self.running_bots
+            .read()
+            .await
+            .iter()
+            .filter(|(_, b)| b.user_id == user_id)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    pub async fn auto_save_sessions(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub async fn has_pending_bet(&self, bot_id: i64) -> bool {
+        self.running_bots
+            .read()
+            .await
+            .get(&bot_id)
+            .map(|rb| rb.pending_bet.is_some())
+            .unwrap_or(false)
+    }
+
+    pub async fn get_pending_bet_size(&self, bot_id: i64) -> f64 {
+        self.running_bots
+            .read()
+            .await
+            .get(&bot_id)
+            .and_then(|rb| rb.pending_bet.as_ref())
+            .map(|bet| bet.bet_size)
+            .unwrap_or(0.0)
+    }
 }
 
-pub async fn start_orchestrator_loop(orchestrator: Arc<BotOrchestrator>, bot_id: i64, user_id: i64, interval_secs: u64, credential_cache: Option<Arc<RwLock<HashMap<i64, CachedCredentials>>>>) {
+pub async fn start_orchestrator_loop(
+    orchestrator: Arc<BotOrchestrator>,
+    bot_id: i64,
+    user_id: i64,
+    interval_secs: u64,
+    credential_cache: Option<Arc<RwLock<HashMap<i64, CachedCredentials>>>>,
+) {
     let mut timer = interval(Duration::from_secs(interval_secs));
     loop {
         timer.tick().await;
-        if !orchestrator.is_running(bot_id).await { break; }
+        if !orchestrator.is_running(bot_id).await {
+            break;
+        }
         let _ = orchestrator.execute_cycle(bot_id, user_id, credential_cache.clone()).await;
     }
 }
 
 pub async fn start_auto_save_loop(orchestrator: Arc<BotOrchestrator>) {
     let mut timer = interval(Duration::from_secs(30));
-    loop { timer.tick().await; let _ = orchestrator.auto_save_sessions().await; }
+    loop {
+        timer.tick().await;
+        let _ = orchestrator.auto_save_sessions().await;
+    }
 }
-impl BotOrchestrator { pub async fn auto_save_sessions(&self) -> Result<(), String> { Ok(()) } }

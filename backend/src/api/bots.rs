@@ -190,6 +190,16 @@ pub async fn get_portfolio(Path((id,)): Path<(i64,)>, State(state): State<AppSta
             let (upnl, val, pos_count) = fetch_unrealized_pnl(&state, claims.user_id).await;
             let mut resp = PortfolioResponse::from_record_with_positions(p, upnl, val);
             resp.open_positions = pos_count;
+
+            // ÚJ: Ha a bot memóriában pending_bet-tel rendelkezik, jelezzük
+            let has_pending_bet = state.orchestrator.has_pending_bet(id).await;
+            if has_pending_bet {
+                resp.open_positions = resp.open_positions.max(1);
+                if resp.total_position_value == 0.0 {
+                    resp.total_position_value = state.orchestrator.get_pending_bet_size(id).await;
+                }
+            }
+
             Json(resp).into_response()
         }
         _ => (StatusCode::INTERNAL_SERVER_ERROR).into_response()

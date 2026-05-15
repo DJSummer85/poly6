@@ -68,12 +68,12 @@ pub struct StrategyParams {
 impl Default for StrategyParams {
     fn default() -> Self {
         Self {
-            min_delta: 0.02,
-            max_delta: 5.0,
-            min_price: 0.30,
-            max_price: 0.70,
-            min_time_remaining: 30000,
-            max_time_remaining: 300000,
+            min_delta: 0.01,       // ← VÁLTOZTASD 0.01-RE (1%)!
+            max_delta: 0.05,
+            min_price: 0.20,
+            max_price: 0.80,
+            min_time_remaining: 15,
+            max_time_remaining: 300,
             min_odds: None,
             max_odds: None,
         }

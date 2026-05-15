@@ -55,7 +55,7 @@ impl MarketSnapshot {
             btc_window_open: self.btc_window_open,
             yes_price: self.yes_price,
             no_price: self.no_price,
-            time_remaining: self.time_remaining * 1000, // convert to ms
+            time_remaining: self.time_remaining,
             btc_velocity: self.btc_velocity,
             btc_acceleration: self.btc_acceleration,
             btc_volatility: self.btc_volatility,
@@ -65,8 +65,8 @@ impl MarketSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Signal {
-    Yes(f64),  // Buy YES, confidence 0-1
-    No(f64),   // Buy NO (sell YES), confidence 0-1
+    Yes(f64),     // Buy YES, confidence 0-1
+    No(f64),      // Buy NO (sell YES), confidence 0-1
     Hold(String), // No action, reason
 }
 
@@ -74,13 +74,12 @@ pub enum Signal {
 #[derive(Debug, Clone)]
 pub struct StrategyContext {
     pub btc_price: f64,
-    pub btc_change: Option<f64>,
+    pub btc_change: Option<f64>,   // ~30 second window change (decimal, e.g. 0.001 = 0.1%)
     pub btc_window_open: Option<f64>,
     pub yes_price: f64,
     pub no_price: f64,
-    pub time_remaining: i64, // milliseconds
-    // Velocity & acceleration (rate of change per second from Binance)
-    pub btc_velocity: Option<f64>,
+    pub time_remaining: i64,       // SECONDS
+    pub btc_velocity: Option<f64>, // % change per second
     pub btc_acceleration: Option<f64>,
     pub btc_volatility: Option<f64>,
 }
@@ -92,24 +91,26 @@ pub struct StrategyExecutor {
     params: StrategyParams,
 }
 
+/// FIX: min_delta properly calibrated for 30-second window
+/// Default: 0.001 (0.1% / 30sec) - realistic movement threshold
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct StrategyParams {
     pub min_delta: f64,
     pub min_price: f64,
     pub max_price: f64,
-    pub min_time_remaining: i64,
-    pub max_time_remaining: i64,
+    pub min_time_remaining: i64, // seconds
+    pub max_time_remaining: i64, // seconds
 }
 
 impl Default for StrategyParams {
     fn default() -> Self {
         Self {
-            min_delta: 0.0007,
+            min_delta: 0.001,        // FIX: 0.1% (volt: 0.0002 = 0.02%, túl alacsony)
             min_price: 0.30,
             max_price: 0.70,
-            min_time_remaining: 3,
-            max_time_remaining: 270,
+            min_time_remaining: 15,  // FIX: 15 másodperc minimum (volt: 8)
+            max_time_remaining: 270, // 4.5 perc maximum
         }
     }
 }
@@ -132,7 +133,7 @@ impl StrategyExecutor {
             btc_window_open: None,
             yes_price: 0.5,
             no_price: 0.5,
-            time_remaining: 60000,
+            time_remaining: 60,
             btc_velocity: None,
             btc_acceleration: None,
             btc_volatility: None,
@@ -171,7 +172,6 @@ impl StrategyExecutor {
         target_price >= self.params.min_price && target_price <= self.params.max_price
     }
 
-    /// #1 WINDOW_DELTA - Compares BTC price vs window opening price
     fn evaluate_window_delta(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too late to trade".to_string());
@@ -210,7 +210,6 @@ impl StrategyExecutor {
         Signal::Hold(format!("Delta too small: {:.4}%", delta_pct))
     }
 
-    /// #2 ORACLE_LAG - Uses BTC change to predict market direction
     fn evaluate_oracle_lag(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too close to close".to_string());
@@ -221,7 +220,7 @@ impl StrategyExecutor {
             None => return Signal::Hold("No BTC data".to_string()),
         };
 
-        let threshold = self.params.min_delta * 100.0 * 0.5;
+        let threshold = self.params.min_delta * 100.0;
 
         if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
             let confidence = (0.60_f64 + change * 5.0).min(0.85_f64);
@@ -234,10 +233,9 @@ impl StrategyExecutor {
         }
     }
 
-    /// #3 LAST_SECONDS_SCALP - T-10 Sniper, only active in last 30 seconds
     fn evaluate_last_seconds_scalp(&self, ctx: StrategyContext) -> Signal {
-        if ctx.time_remaining > 30 || ctx.time_remaining < 4 {
-            return Signal::Hold("Outside T-10 window".to_string());
+        if ctx.time_remaining > 30 || ctx.time_remaining < 6 {
+            return Signal::Hold("Outside scalp window".to_string());
         }
         if ctx.btc_price == 0.0 {
             return Signal::Hold("No BTC price".to_string());
@@ -250,17 +248,17 @@ impl StrategyExecutor {
             0.0
         };
 
-        if delta_pct.abs() < 0.04 {
+        if delta_pct.abs() < 0.06 {
             return Signal::Hold(format!("Delta too small: {:.4}%", delta_pct));
         }
 
         let action = if delta_pct > 0.0 { "YES" } else { "NO" };
         let target_price = if action == "YES" { ctx.yes_price } else { ctx.no_price };
 
-        if target_price > 0.75 {
+        if target_price > 0.70 {
             return Signal::Hold(format!("Price too high: {:.0}c", target_price * 100.0));
         }
-        if target_price < 0.25 {
+        if target_price < 0.30 {
             return Signal::Hold(format!("Price too low: {:.0}c", target_price * 100.0));
         }
 
@@ -273,6 +271,7 @@ impl StrategyExecutor {
     }
 
     /// MOMENTUM - follows recent BTC direction
+    /// FIX: Higher threshold and confidence baseline
     fn evaluate_momentum(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too late".to_string());
@@ -283,46 +282,28 @@ impl StrategyExecutor {
             None => return Signal::Hold("No BTC data".to_string()),
         };
 
-        // Lower threshold: 0.0003 (0.03%) instead of min_delta
-        let threshold = self.params.min_delta * 0.4;
+        // FIX: threshold = min_delta * 1.2 (szigorúbb szűrő)
+        let threshold = self.params.min_delta * 1.2;
+
+        // FIX: Fee buffer - csak akkor tradeelj, ha az edge nagyobb mint a fee
+        let estimated_fee = 0.02; // 2% Polymarket fee + slippage
+        if change.abs() < (threshold + estimated_fee) {
+            return Signal::Hold(format!("Edge too small after fees: {:.4}%", change * 100.0));
+        }
 
         if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.55_f64 + change * 50.0).min(0.80_f64);
+            // FIX: Magasabb baseline confidence (60% helyett 55%)
+            let confidence = (0.60_f64 + change.abs() * 100.0).min(0.85_f64);
             Signal::Yes(confidence)
         } else if change < -threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.55_f64 + change.abs() * 50.0).min(0.80_f64);
+            let confidence = (0.60_f64 + change.abs() * 100.0).min(0.85_f64);
             Signal::No(confidence)
         } else {
             Signal::Hold(format!("No momentum: {:.4}%", change * 100.0))
         }
     }
 
-    /// SMART TREND - requires stronger confirmation
     fn evaluate_trend(&self, ctx: StrategyContext) -> Signal {
-        if ctx.time_remaining < self.params.min_time_remaining {
-            return Signal::Hold("Too late".to_string());
-        }
-
-        let change = match ctx.btc_change {
-            Some(c) => c,
-            None => return Signal::Hold("No BTC data".to_string()),
-        };
-
-        let threshold = self.params.min_delta * 1.0;
-
-        if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.60_f64 + change * 40.0).min(0.82_f64);
-            Signal::Yes(confidence)
-        } else if change < -threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.60_f64 + change.abs() * 40.0).min(0.82_f64);
-            Signal::No(confidence)
-        } else {
-            Signal::Hold(format!("No strong trend: {:.4}%", change * 100.0))
-        }
-    }
-
-    /// VOLATILITY BREAKOUT - catches sudden moves in either direction
-    fn evaluate_volatility(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too late".to_string());
         }
@@ -335,18 +316,17 @@ impl StrategyExecutor {
         let threshold = self.params.min_delta * 1.5;
 
         if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.60_f64 + change * 30.0).min(0.82_f64);
+            let confidence = (0.60_f64 + change * 120.0).min(0.82_f64);
             Signal::Yes(confidence)
         } else if change < -threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.60_f64 + change.abs() * 30.0).min(0.82_f64);
+            let confidence = (0.60_f64 + change.abs() * 120.0).min(0.82_f64);
             Signal::No(confidence)
         } else {
-            Signal::Hold(format!("Low volatility: {:.4}%", change.abs() * 100.0))
+            Signal::Hold(format!("No strong trend: {:.4}%", change * 100.0))
         }
     }
 
-    /// SNIPER - high confidence, low frequency
-    fn evaluate_sniper(&self, ctx: StrategyContext) -> Signal {
+    fn evaluate_volatility(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too late".to_string());
         }
@@ -359,6 +339,29 @@ impl StrategyExecutor {
         let threshold = self.params.min_delta * 2.0;
 
         if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
+            let confidence = (0.60_f64 + change * 100.0).min(0.82_f64);
+            Signal::Yes(confidence)
+        } else if change < -threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
+            let confidence = (0.60_f64 + change.abs() * 100.0).min(0.82_f64);
+            Signal::No(confidence)
+        } else {
+            Signal::Hold(format!("Low volatility: {:.4}%", change.abs() * 100.0))
+        }
+    }
+
+    fn evaluate_sniper(&self, ctx: StrategyContext) -> Signal {
+        if ctx.time_remaining < self.params.min_time_remaining {
+            return Signal::Hold("Too late".to_string());
+        }
+
+        let change = match ctx.btc_change {
+            Some(c) => c,
+            None => return Signal::Hold("No BTC data".to_string()),
+        };
+
+        let threshold = self.params.min_delta * 3.0;
+
+        if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
             Signal::Yes(0.85)
         } else if change < -threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
             Signal::No(0.85)
@@ -367,7 +370,6 @@ impl StrategyExecutor {
         }
     }
 
-    /// CONTRARIAN - bets against movement (mean reversion)
     fn evaluate_contrarian(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too late".to_string());
@@ -378,21 +380,19 @@ impl StrategyExecutor {
             None => return Signal::Hold("No BTC data".to_string()),
         };
 
-        let threshold = self.params.min_delta * 0.5;
+        let threshold = self.params.min_delta * 2.0;
 
-        // Price up -> bet NO (will revert), Price down -> bet YES (will revert)
         if change > threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.55_f64 + change * 30.0).min(0.75_f64);
+            let confidence = (0.55_f64 + change * 80.0).min(0.75_f64);
             Signal::No(confidence)
         } else if change < -threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.55_f64 + change.abs() * 30.0).min(0.75_f64);
+            let confidence = (0.55_f64 + change.abs() * 80.0).min(0.75_f64);
             Signal::Yes(confidence)
         } else {
             Signal::Hold("No contrarian signal".to_string())
         }
     }
 
-    /// MEAN REVERSION - bets on return to 0.5 when price is extreme
     fn evaluate_mean_reversion(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too late".to_string());
@@ -411,11 +411,7 @@ impl StrategyExecutor {
         }
     }
 
-    /// BINANCE VELOCITY - exact port from polymarket-demo binance-velocity.ts
-    /// Uses BTC velocity (rate of change) and acceleration from Binance klines
-    /// Only trades when BOTH velocity AND acceleration confirm the direction
     fn evaluate_velocity(&self, ctx: StrategyContext) -> Signal {
-        // Time check - avoid last 45 seconds
         if ctx.time_remaining < 45 {
             return Signal::Hold("Too close to closure".to_string());
         }
@@ -428,31 +424,24 @@ impl StrategyExecutor {
             return Signal::Hold("No BTC price".to_string());
         }
 
-        // Avoid high volatility periods (unpredictable)
-        // btc_volatility > 0.003 means >0.3% volatility
         if btc_volatility > 0.003 {
             return Signal::Hold("High volatility - market unpredictable".to_string());
         }
 
-        // Minimum velocity threshold: 0.015% per second
         let min_velocity: f64 = 0.00015;
         let min_acceleration: f64 = 0.00008;
 
-        if velocity.abs() < min_velocity {
-            return Signal::Hold(format!("Velocity too low: {:.4}%/s (choppy)", velocity * 100.0));
+        if velocity.abs() < min_velocity || acceleration.abs() < min_acceleration {
+            return Signal::Hold(format!(
+                "Signal too weak: vel={:.4}%/s acc={:.5}%/s²",
+                velocity * 100.0, acceleration * 100.0
+            ));
         }
 
         let is_up = velocity > 0.0;
         let is_accelerating = (is_up && acceleration > 0.0) || (!is_up && acceleration < 0.0);
 
-        // Need BOTH velocity AND acceleration above thresholds
-        if velocity.abs() < min_velocity || acceleration.abs() < min_acceleration {
-            return Signal::Hold("Signal too weak - need both velocity AND acceleration".to_string());
-        }
-
-        // Only trade if accelerating (momentum building)
         if is_accelerating {
-            // Check price limits
             let action = if is_up { "YES" } else { "NO" };
             let target_price = if is_up { ctx.yes_price } else { ctx.no_price };
 
@@ -460,54 +449,45 @@ impl StrategyExecutor {
                 return Signal::Hold(format!("Price out of range: {:.0}c", target_price * 100.0));
             }
 
-            // Confidence calculation matching demo
             let vel_strength = (velocity.abs() * 800.0).min(0.25);
             let acc_boost = (acceleration.abs() * 800.0).min(0.15);
-            let base_confidence = 0.55_f64;
-            let confidence = (base_confidence + vel_strength + acc_boost).min(0.80);
+            let confidence = (0.55_f64 + vel_strength + acc_boost).min(0.80);
 
             tracing::info!(
-                "Binance Velocity: {} | vel={:.3}%/s acc={:.4}%/s² conf={:.2}",
+                "Velocity signal: {} | vel={:.3}%/s acc={:.4}%/s² conf={:.2}",
                 action, velocity * 100.0, acceleration * 100.0, confidence
             );
 
-            if is_up {
-                Signal::Yes(confidence)
-            } else {
-                Signal::No(confidence)
-            }
+            if is_up { Signal::Yes(confidence) } else { Signal::No(confidence) }
         } else {
-            // Decelerating - momentum fading, skip
             Signal::Hold(format!(
-                "Decelerating - momentum fading: vel={:.3}%/s acc={:.4}%/s²",
+                "Decelerating: vel={:.3}%/s acc={:.4}%/s²",
                 velocity * 100.0, acceleration * 100.0
             ))
         }
     }
 
-    /// FAIR VALUE ARB - basic arbitrage around 0.5
     fn evaluate_fair_value(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too late".to_string());
         }
 
         let change = ctx.btc_change.unwrap_or(0.0);
+        let min_change = self.params.min_delta * 0.5;
 
-        // Use BTC direction to confirm fair value bet
-        if ctx.yes_price > 0.55 && ctx.yes_price <= self.params.max_price && change < 0.0 {
+        if ctx.yes_price > 0.55 && ctx.yes_price <= self.params.max_price && change < -min_change {
             Signal::No(0.58)
-        } else if ctx.yes_price < 0.45 && ctx.yes_price >= self.params.min_price && change > 0.0 {
+        } else if ctx.yes_price < 0.45 && ctx.yes_price >= self.params.min_price && change > min_change {
             Signal::Yes(0.58)
-        } else if ctx.yes_price > 0.60 && ctx.yes_price <= self.params.max_price {
+        } else if ctx.yes_price > 0.62 && ctx.yes_price <= self.params.max_price {
             Signal::No(0.52)
-        } else if ctx.yes_price < 0.40 && ctx.yes_price >= self.params.min_price {
+        } else if ctx.yes_price < 0.38 && ctx.yes_price >= self.params.min_price {
             Signal::Yes(0.52)
         } else {
             Signal::Hold(format!("Near fair value: {:.0}c", ctx.yes_price * 100.0))
         }
     }
 
-    /// PRICE REVERSION - bets when price deviates significantly
     fn evaluate_price_reversion(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too late".to_string());
@@ -530,7 +510,6 @@ impl StrategyExecutor {
         }
     }
 
-    /// TREND PULLBACK - high-conviction hours only (00-02, 08-10, 14-16 UTC)
     fn evaluate_trend_pullback(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too close to close".to_string());
@@ -552,7 +531,7 @@ impl StrategyExecutor {
             0.0
         };
 
-        if delta_pct.abs() < 0.02 {
+        if delta_pct.abs() < 0.05 {
             return Signal::Hold("Delta too small".to_string());
         }
 
@@ -567,9 +546,8 @@ impl StrategyExecutor {
         }
     }
 
-    /// ULTRA LOW ENTRY - buys at 4-15 cents where market underestimates probability
     fn evaluate_ultra_low_entry(&self, ctx: StrategyContext) -> Signal {
-        if ctx.time_remaining < self.params.min_time_remaining {
+        if ctx.time_remaining < 20 {
             return Signal::Hold("Too close to close".to_string());
         }
 
@@ -581,15 +559,14 @@ impl StrategyExecutor {
         };
 
         let change = ctx.btc_change.unwrap_or(0.0);
+        let min_change = self.params.min_delta * 0.5;
 
-        // Buy YES if very cheap and BTC is going up
-        if ctx.yes_price < 0.15 && ctx.yes_price >= 0.04 && (delta_pct > 0.02 || change > 0.0001) {
+        if ctx.yes_price < 0.15 && ctx.yes_price >= 0.04 && (delta_pct > 0.05 || change > min_change) {
             let confidence = (0.55_f64 + (0.15 - ctx.yes_price) * 3.0).min(0.85_f64);
             return Signal::Yes(confidence);
         }
 
-        // Buy NO if very cheap and BTC is going down
-        if ctx.no_price < 0.15 && ctx.no_price >= 0.04 && (delta_pct < -0.02 || change < -0.0001) {
+        if ctx.no_price < 0.15 && ctx.no_price >= 0.04 && (delta_pct < -0.05 || change < -min_change) {
             let confidence = (0.55_f64 + (0.15 - ctx.no_price) * 3.0).min(0.85_f64);
             return Signal::No(confidence);
         }
@@ -597,7 +574,6 @@ impl StrategyExecutor {
         Signal::Hold(format!("Not in ultra-low range: YES={:.0}c NO={:.0}c", ctx.yes_price * 100.0, ctx.no_price * 100.0))
     }
 
-    /// SNIPER VALUE - buys at extremes
     fn evaluate_sniper_value(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < 20 {
             return Signal::Hold("Too close to close".to_string());
@@ -613,39 +589,30 @@ impl StrategyExecutor {
             return Signal::No(confidence);
         }
 
-        if ctx.yes_price > 0.55 && ctx.yes_price < 0.70 {
-            let confidence = (0.52_f64 + (ctx.yes_price - 0.55) * 2.0).min(0.72_f64);
-            return Signal::No(confidence);
-        }
-
-        if ctx.yes_price < 0.45 && ctx.yes_price > 0.30 {
-            let confidence = (0.52_f64 + (0.45 - ctx.yes_price) * 2.0).min(0.72_f64);
-            return Signal::Yes(confidence);
-        }
-
-        Signal::Hold(format!("No sniper setup: {:.0}c", ctx.yes_price * 100.0))
+        Signal::Hold(format!("No sniper setup: YES={:.0}c NO={:.0}c", ctx.yes_price * 100.0, ctx.no_price * 100.0))
     }
 
-    /// ODDS SWING - buys outcomes priced < 15 cents for a swing to 2x
     fn evaluate_odds_swing(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < 30 {
             return Signal::Hold("Too close to close".to_string());
         }
 
-        if ctx.yes_price < 0.15 && ctx.yes_price >= 0.04 {
-            let confidence = (0.50_f64 + (0.15 - ctx.yes_price) * 4.0).min(0.80_f64);
+        let change = ctx.btc_change.unwrap_or(0.0);
+        let min_change = self.params.min_delta * 0.5;
+
+        if ctx.yes_price < 0.15 && ctx.yes_price >= 0.04 && change > min_change {
+            let confidence = (0.55_f64 + (0.15 - ctx.yes_price) * 4.0).min(0.80_f64);
             return Signal::Yes(confidence);
         }
 
-        if ctx.no_price < 0.15 && ctx.no_price >= 0.04 {
-            let confidence = (0.50_f64 + (0.15 - ctx.no_price) * 4.0).min(0.80_f64);
+        if ctx.no_price < 0.15 && ctx.no_price >= 0.04 && change < -min_change {
+            let confidence = (0.55_f64 + (0.15 - ctx.no_price) * 4.0).min(0.80_f64);
             return Signal::No(confidence);
         }
 
         Signal::Hold("No swing opportunity".to_string())
     }
 
-    /// BAYESIAN EV - requires 3 conditions: delta edge + market mispricing + Kelly positive EV
     fn evaluate_bayesian_ev(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too close to close".to_string());
@@ -658,11 +625,10 @@ impl StrategyExecutor {
             0.0
         };
 
-        // Also consider tick change
         let tick_change = ctx.btc_change.unwrap_or(0.0) * 100.0;
-        let combined_delta = delta_pct * 0.7 + tick_change * 0.3;
+        let combined_delta = delta_pct * 0.8 + tick_change * 0.2;
 
-        if combined_delta.abs() < 0.03 {
+        if combined_delta.abs() < 0.02 {
             return Signal::Hold("Insufficient BTC delta".to_string());
         }
 
@@ -690,13 +656,6 @@ impl StrategyExecutor {
         }
     }
 
-    // ============================================================
-    // NEW PROFITABLE STRATEGIES FOR LOW-VOLATILITY BTC MARKET
-    // ============================================================
-
-    /// HIGH_CONVICTION_MOMENTUM - Only trades when confidence > 0.75
-    /// Key insight: Need >75% win rate to overcome the 50c edge
-    /// Only triggers on STRONG momentum (+/- 0.15%+ BTC change)
     fn evaluate_high_conviction_momentum(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too late".to_string());
@@ -710,15 +669,13 @@ impl StrategyExecutor {
             None => return Signal::Hold("No BTC data".to_string()),
         };
 
-        // Strong threshold: 0.05% minimum (was 0.15%)
-        let strong_threshold = 0.0005; // 0.05%
+        let strong_threshold = self.params.min_delta * 1.5;
 
         if change > strong_threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            // Only trade if price is reasonable (not already inflated)
             if ctx.yes_price > 0.60 {
                 return Signal::Hold(format!("YES price too high: {:.0}c", ctx.yes_price * 100.0));
             }
-            let confidence = (0.75_f64 + change * 100.0).min(0.92_f64);
+            let confidence = (0.75_f64 + change * 300.0).min(0.92_f64);
             if confidence >= 0.75 {
                 return Signal::Yes(confidence);
             }
@@ -729,7 +686,7 @@ impl StrategyExecutor {
             if ctx.no_price > 0.60 {
                 return Signal::Hold(format!("NO price too high: {:.0}c", ctx.no_price * 100.0));
             }
-            let confidence = (0.75_f64 + change.abs() * 100.0).min(0.92_f64);
+            let confidence = (0.75_f64 + change.abs() * 300.0).min(0.92_f64);
             if confidence >= 0.75 {
                 return Signal::No(confidence);
             }
@@ -739,9 +696,6 @@ impl StrategyExecutor {
         Signal::Hold(format!("No strong momentum: {:.4}%", change * 100.0))
     }
 
-    /// SNIPER_ARB - Extreme price deviation + BTC confirmation
-    /// Only trades when YES/NO is 42c or less (big deviation from 50c)
-    /// With BTC confirmation for direction
     fn evaluate_sniper_arb(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too close to close".to_string());
@@ -755,31 +709,27 @@ impl StrategyExecutor {
             None => return Signal::Hold("No BTC data".to_string()),
         };
 
-        // Only trade when market mispriced: YES < 0.42 or NO < 0.42
-        // These are "cheap" and likely to revert to 50c
+        let min_change = self.params.min_delta;
 
-        // YES is cheap (< 42c) + BTC going UP = buy YES (will revert up)
         if ctx.yes_price < 0.42 && ctx.yes_price >= 0.30 {
-            if change > 0.0005 && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-                let edge = 0.50 - ctx.yes_price; // How much discount from fair value
-                let confidence = (0.60_f64 + edge * 5.0 + change * 50.0).min(0.88_f64);
+            if change > min_change && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
+                let edge = 0.50 - ctx.yes_price;
+                let confidence = (0.60_f64 + edge * 5.0 + change * 200.0).min(0.88_f64);
                 return Signal::Yes(confidence);
             }
         }
 
-        // NO is cheap (< 42c) + BTC going DOWN = buy NO (will revert up)
         if ctx.no_price < 0.42 && ctx.no_price >= 0.30 {
-            if change < -0.0005 && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
+            if change < -min_change && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
                 let edge = 0.50 - ctx.no_price;
-                let confidence = (0.60_f64 + edge * 5.0 + change.abs() * 50.0).min(0.88_f64);
+                let confidence = (0.60_f64 + edge * 5.0 + change.abs() * 200.0).min(0.88_f64);
                 return Signal::No(confidence);
             }
         }
 
-        // Also: YES > 58c = slightly expensive, BTC going DOWN = bet NO
         if ctx.yes_price > 0.58 && ctx.yes_price <= 0.70 {
-            if change < -0.0005 && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-                let confidence = (0.58_f64 + change.abs() * 50.0).min(0.80_f64);
+            if change < -min_change && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
+                let confidence = (0.58_f64 + change.abs() * 200.0).min(0.80_f64);
                 return Signal::No(confidence);
             }
         }
@@ -791,9 +741,6 @@ impl StrategyExecutor {
         ))
     }
 
-    /// VOLATILITY_FILTERED - Only trades when volatility is "sweet spot"
-    /// Too low = random walk, Too high = unpredictable
-    /// Sweet spot: 0.02% - 0.25% per 5-min window
     fn evaluate_volatility_filtered(&self, ctx: StrategyContext) -> Signal {
         if ctx.time_remaining < self.params.min_time_remaining {
             return Signal::Hold("Too close to close".to_string());
@@ -808,10 +755,8 @@ impl StrategyExecutor {
         };
 
         let abs_change = change.abs();
-
-        // Sweet spot: 0.03% to 0.15% volatility (tightened)
-        let min_vol = 0.0003; // 0.03%
-        let max_vol = 0.0015; // 0.15%
+        let min_vol = 0.0001;
+        let max_vol = 0.0008;
 
         if abs_change < min_vol {
             return Signal::Hold(format!("Volatility too low: {:.4}%", abs_change * 100.0));
@@ -820,22 +765,20 @@ impl StrategyExecutor {
             return Signal::Hold(format!("Volatility too high: {:.4}%", abs_change * 100.0));
         }
 
-        // Sweet spot - calculate confidence based on consistency
-        let confidence = 0.62_f64 + (abs_change / max_vol) * 0.25_f64;
+        let confidence = 0.62_f64 + (abs_change / max_vol) * 0.20_f64;
 
         if change > 0.0 && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            // Only buy YES if price is reasonable
             if ctx.yes_price > 0.65 {
                 return Signal::Hold(format!("YES price too high: {:.0}c", ctx.yes_price * 100.0));
             }
-            return Signal::Yes(confidence.min(0.85_f64));
+            return Signal::Yes(confidence.min(0.82_f64));
         }
 
         if change < 0.0 && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
             if ctx.no_price > 0.65 {
                 return Signal::Hold(format!("NO price too high: {:.0}c", ctx.no_price * 100.0));
             }
-            return Signal::No(confidence.min(0.85_f64));
+            return Signal::No(confidence.min(0.82_f64));
         }
 
         Signal::Hold(format!("No clear direction: {:.4}%", change * 100.0))

@@ -29,14 +29,14 @@ impl Default for RiskSettings {
             max_daily_loss: 5.0,
             max_position_size: 3.0,
             max_drawdown_percent: 20.0,
-            min_confidence: 0.55,
-            cooldown_after_loss_secs: 15.0,
-            max_trades_per_hour: 40,
-            portfolio_max_loss: 10.0,
+            min_confidence: 0.60,
+            cooldown_after_loss_secs: 30.0,
+            max_trades_per_hour: 20,
+            portfolio_max_loss: 10.0, // ← EZT ADD HOZZÁ
             portfolio_max_drawdown: 25.0,
             kelly_enabled: true,
             kelly_fraction: 0.25,
-            kelly_min_confidence: 0.55,
+            kelly_min_confidence: 0.60,
             circuit_breaker_enabled: true,
             consecutive_loss_threshold: 5,
             auto_reduce_on_loss: true,
@@ -44,19 +44,20 @@ impl Default for RiskSettings {
         }
     }
 }
-
 impl RiskSettings {
     /// Relaxed settings for paper/demo trading
+    /// FIX: Still maintain reasonable risk controls even in paper mode
     pub fn paper_mode() -> Self {
         Self {
             max_daily_loss: 20.0,
-            max_drawdown_percent: 50.0,
-            min_confidence: 0.45,
-            cooldown_after_loss_secs: 5.0,
-            consecutive_loss_threshold: 15,
-            circuit_breaker_enabled: false,
-            portfolio_max_loss: 30.0,
-            portfolio_max_drawdown: 60.0,
+            max_drawdown_percent: 30.0,  // FIX: 50% → 30%
+            min_confidence: 0.60,  // FIX: 45% → 60% (CRITICAL: 45% = guaranteed loss with fees)
+            cooldown_after_loss_secs: 30.0,  // FIX: 5 → 30 seconds
+            max_trades_per_hour: 10,  // FIX: 40 → 10
+            consecutive_loss_threshold: 5,  // FIX: 15 → 5
+            circuit_breaker_enabled: true,  // FIX: false → true (CRITICAL)
+            portfolio_max_loss: 25.0,
+            portfolio_max_drawdown: 40.0,  // FIX: 60% → 40%
             ..Self::default()
         }
     }
@@ -173,9 +174,6 @@ impl RiskManager {
     }
 
     /// Calculate position size using Kelly Criterion
-    /// f* = (bp - q) / b
-    /// b = (1 - price) / price (net odds)
-    /// p = confidence (win probability)
     pub fn calculate_kelly_size(
         &self,
         confidence: f64,
@@ -202,12 +200,11 @@ impl RiskManager {
         }
 
         kelly *= kelly_fraction;
-        kelly = kelly.min(0.25); // Cap at 25% of bankroll
+        kelly = kelly.min(0.25);
 
         bankroll * kelly
     }
 
-    /// Get suggested bet size combining Kelly and streak adjustments
     pub fn get_suggested_bet_size(
         &mut self,
         bot_id: i64,
@@ -229,7 +226,6 @@ impl RiskManager {
             }
         }
 
-        // Streak adjustments
         if self.settings.auto_reduce_on_loss && state.consecutive_losses > 0 {
             let reduction = 0.5_f64.powi(state.consecutive_losses.min(3) as i32);
             size *= reduction;
@@ -247,7 +243,6 @@ impl RiskManager {
         (size, method)
     }
 
-    /// Record a trade result for auto-adjustment tracking
     pub fn record_trade_result(&mut self, bot_id: i64, won: bool) {
         self.init_bot(bot_id);
         let state = self.bot_states.get_mut(&bot_id).unwrap();
@@ -303,10 +298,13 @@ impl RiskManager {
             return (false, Some(msg));
         }
 
-        // Confidence
-        if confidence < self.settings.min_confidence {
-            let msg = format!("Confidence {:.0}% below minimum {:.0}%",
-                confidence * 100.0, self.settings.min_confidence * 100.0);
+        // FIX: Confidence check with fee buffer
+        // Need higher confidence to overcome Polymarket fees (~2%)
+        let fee_buffer = 0.02; // 2% fee
+        let effective_confidence = confidence - fee_buffer;
+        if effective_confidence < self.settings.min_confidence {
+            let msg = format!("Effective confidence {:.0}% below minimum {:.0}% (after {:.0}% fee buffer)",
+                effective_confidence * 100.0, self.settings.min_confidence * 100.0, fee_buffer * 100.0);
             return (false, Some(msg));
         }
 
@@ -370,10 +368,14 @@ impl RiskManager {
             return (false, Some(msg));
         }
 
+        // FIX: Increment trades_this_hour AFTER all checks pass
+        if let Some(state) = self.bot_states.get_mut(&bot_id) {
+            state.trades_this_hour += 1;
+        }
+
         (true, None)
     }
 
-    /// Get adjusted bet size based on win/loss streaks
     pub fn get_adjusted_bet_size(&mut self, bot_id: i64, base_bet: f64) -> f64 {
         self.init_bot(bot_id);
         let state = self.bot_states.get(&bot_id).unwrap().clone();
@@ -394,7 +396,6 @@ impl RiskManager {
         (adjusted.max(base_bet * 0.25)).min(base_bet * 2.0)
     }
 
-    /// Pause a bot
     pub fn pause_bot(&mut self, bot_id: i64, reason: String) {
         self.init_bot(bot_id);
         let state = self.bot_states.get_mut(&bot_id).unwrap();
@@ -403,7 +404,6 @@ impl RiskManager {
         self.add_warning(bot_id, "drawdown", reason, "critical");
     }
 
-    /// Resume a bot
     pub fn resume_bot(&mut self, bot_id: i64) {
         self.init_bot(bot_id);
         let state = self.bot_states.get_mut(&bot_id).unwrap();
@@ -411,7 +411,6 @@ impl RiskManager {
         state.pause_reason = None;
     }
 
-    /// Get bot risk status
     pub fn get_bot_risk_status(&mut self, bot_id: i64, current_balance: f64, initial_balance: f64) -> RiskStatus {
         self.check_daily_reset();
         self.init_bot(bot_id);
@@ -449,23 +448,19 @@ impl RiskManager {
         }
     }
 
-    /// Get all warnings
     pub fn get_warnings(&self, limit: usize) -> Vec<RiskWarning> {
         self.warnings.iter().take(limit).cloned().collect()
     }
 
-    /// Clear warnings for a bot
     pub fn clear_warnings(&mut self, bot_id: i64) {
         self.warnings.retain(|w| w.bot_id != bot_id);
     }
 
-    /// Reset bot state
     pub fn reset_bot(&mut self, bot_id: i64) {
         self.bot_states.remove(&bot_id);
         self.clear_warnings(bot_id);
     }
 
-    /// Set portfolio start balance
     pub fn set_portfolio_start_balance(&mut self, balance: f64) {
         self.portfolio_start_balance = balance;
     }

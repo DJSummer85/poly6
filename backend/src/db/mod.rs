@@ -1562,27 +1562,35 @@ sqlx::query(
         Ok(result)
     }
 
-    /// Record paper trade settlement: update portfolio + trade_decisions
-    /// Returns the net balance change (positive = win, negative = loss)
+    /// Record paper trade settlement: update portfolio + trade_decisions.
+    ///
+    /// - `settlement_credit`: az egyenleghez hozzáadandó összeg
+    ///     WIN:  bet_size + profit (tét visszajár + profit)
+    ///     LOSE: 0.0             (tét már le volt vonva fogadáskor)
+    /// - `pnl_for_stats`: a statisztikai total_pnl-hez használt nettó PnL
+    ///     WIN:  +profit_only
+    ///     LOSE: -bet_size
     pub async fn record_paper_settlement(
         db: &Db,
         bot_id: i64,
         decision_id: i64,
         won: bool,
-        pnl: f64,
+        settlement_credit: f64,
+        pnl_for_stats: f64,
     ) -> Result<(), sqlx::Error> {
         let pool = db.as_ref();
-        let _sign = if won { 1 } else { -1 };
 
-        // Update trade_decision PnL
+        // Update trade_decision PnL (nettó nyereség/veszteség)
         sqlx::query("UPDATE trade_decisions SET pnl = ? WHERE id = ?")
-            .bind(pnl)
+            .bind(pnl_for_stats)
             .bind(decision_id)
             .execute(pool)
             .await?;
 
         // Update portfolio stats
         if won {
+            // Nyerés: visszaadjuk a tétet + profitot az egyenlegbe,
+            // a total_pnl-be csak a nettó profitot könyveljük.
             sqlx::query(
                 r#"
                 UPDATE bot_portfolios SET
@@ -1596,18 +1604,19 @@ sqlx::query(
                 WHERE bot_id = ?
                 "#,
             )
-            .bind(pnl)
-            .bind(pnl)
-            .bind(pnl)
+            .bind(settlement_credit) // balance növelés = tét + profit
+            .bind(pnl_for_stats)     // total_pnl növelés = csak profit
+            .bind(settlement_credit) // peak_balance számítás
             .bind(bot_id)
             .execute(pool)
             .await?;
         } else {
-            let loss = pnl.abs();
+            // Veszítés: a tét már le lett vonva fogadáskor (update_portfolio_balance).
+            // NE vonjuk le mégegyszer a balance-ból! Csak a statokat frissítjük.
+            let loss = pnl_for_stats.abs(); // = bet_size
             sqlx::query(
                 r#"
                 UPDATE bot_portfolios SET
-
                     losing_trades = losing_trades + 1,
                     total_trades = total_trades + 1,
                     total_pnl = total_pnl - ?,

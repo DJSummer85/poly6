@@ -479,11 +479,11 @@ export function CommandCenter() {
         onToggle={() => togglePanel("botsAndPositions")}
         bodyClassName="p-0"
       >
-        <div className="grid gap-4 lg:grid-cols-[320px_1fr] p-4">
-          <div className="min-w-0">
+        <div className="flex flex-col gap-4 p-4">
+          <div className="w-full">
             <BotSelector />
           </div>
-          <div className="min-w-0">
+          <div className="w-full">
             <ActivityTabs />
           </div>
         </div>

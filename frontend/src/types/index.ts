@@ -31,6 +31,7 @@ export interface Bot {
   win_rate?: number;
   stop_loss: number;
   take_profit: number;
+  asset: string;
 }
 
 export type StrategyType =

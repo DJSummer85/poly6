@@ -23,12 +23,12 @@ use crate::trading::polymarket::{PolymarketClient, OrderRequest};
 pub enum BotEvent {
     SessionStarted { bot_id: i64, session_id: i64, bot_name: String },
     SessionEnded { bot_id: i64, session_id: i64, final_balance: f64, total_pnl: f64 },
-    TradeDecision { bot_id: i64, bot_name: String, outcome: String, confidence: f64, bet_size: f64, reason: String },
+    TradeDecision { bot_id: i64, bot_name: String, outcome: String, confidence: f64, bet_size: f64, reason: String, asset: String },
     OrderExecuted { bot_id: i64, order_id: String },
     BalanceUpdated { bot_id: i64, balance: f64 },
     MarketTransition { new_market_slug: String },
     Error { bot_id: i64, message: String },
-    Scanning { bot_id: i64, market_slug: String },
+    Scanning { bot_id: i64, market_slug: String, asset: String },
     Evaluating { bot_id: i64, strategy: String, confidence: f64 },
     PositionUpdate { bot_id: i64, side: String, size: f64, price: f64, unrealized_pnl: f64 },
     TradeResult { bot_id: i64, won: bool, pnl: f64 },
@@ -37,8 +37,9 @@ pub enum BotEvent {
 #[derive(Debug, Clone)]
 pub struct PendingBet {
     pub side: String,
+    pub asset: String,      // BTC, ETH, SOL, XRP
     pub bet_size: f64,
-    pub start_price: f64,   // BTC ár fogadás nyitásakor
+    pub start_price: f64,   // Ár fogadás nyitásakor
     pub entry_price: f64,   // YES/NO token ára (0-1)
     pub decision_id: i64,
     pub price_to_beat: Option<f64>, // Polymarket settlement küszöb
@@ -289,34 +290,47 @@ impl BotOrchestrator {
 
         let all_markets = fetch_active_markets("5").await;
         // FIX: Minden bot különböző piacot kap, bot_id alapján round-robin elosztással.
-        // Ha nincs elég piac, az első piacon osztoznak.
         let market = if all_markets.is_empty() {
             return Ok(());
         } else {
             let idx = (bot_id as usize) % all_markets.len();
             all_markets[idx].clone()
         };
-        let btc_price = self.fetch_btc_price().await?;
+
+        // A piacnak megfelelő eszköz árfolyamát kérjük le
+        let asset_price = crate::api::market::get_asset_price(&market.asset).await.unwrap_or(0.0);
+        if asset_price == 0.0 {
+            return Ok(());
+        }
         
-        // Calculate BTC change and velocity/acceleration from price history
-        let btc_change;
-        let btc_velocity;
-        let btc_acceleration;
+        // Calculate asset change and velocity/acceleration from price history
+        let asset_change;
+        let asset_velocity;
+        let asset_acceleration;
         {
             let now = Instant::now();
-            rb.btc_price_history.push((btc_price, now));
+            rb.btc_price_history.push((asset_price, now));
             let cutoff = now - Duration::from_secs(60);
             rb.btc_price_history.retain(|(_, t)| *t > cutoff);
             
             if rb.btc_price_history.len() >= 2 {
-                let oldest_price = rb.btc_price_history.first().map(|(p, _)| *p).unwrap_or(btc_price);
-                btc_change = Some((btc_price - oldest_price) / oldest_price);
+                // FIX: Use a fixed 30-second window for change calculation
+                let window_duration = Duration::from_secs(30);
+                let target_time = now - window_duration;
+                
+                let oldest_in_window = rb.btc_price_history.iter()
+                    .find(|(_, t)| *t >= target_time)
+                    .or_else(|| rb.btc_price_history.first())
+                    .map(|(p, _)| *p)
+                    .unwrap_or(asset_price);
+                    
+                asset_change = Some((asset_price - oldest_in_window) / oldest_in_window);
                 
                 let first_instant = rb.btc_price_history.first().map(|(_, t)| *t).unwrap();
                 let last_instant = rb.btc_price_history.last().map(|(_, t)| *t).unwrap();
                 let duration_secs = (last_instant - first_instant).as_secs_f64().max(1.0);
                 
-                btc_velocity = Some(btc_change.unwrap() / duration_secs);
+                asset_velocity = Some(asset_change.unwrap() / duration_secs);
                 
                 if rb.btc_price_history.len() >= 3 {
                     let mid_idx = rb.btc_price_history.len() / 2;
@@ -326,35 +340,35 @@ impl BotOrchestrator {
                     let first_to_mid_secs = (mid_instant - first_instant).as_secs_f64().max(1.0);
                     let mid_to_last_secs = (last_instant - mid_instant).as_secs_f64().max(1.0);
                     
+                    let oldest_price = rb.btc_price_history.first().map(|(p, _)| *p).unwrap();
                     let velocity_first_half = (mid_price - oldest_price) / oldest_price / first_to_mid_secs;
-                    let velocity_second_half = (btc_price - mid_price) / mid_price / mid_to_last_secs;
+                    let velocity_second_half = (asset_price - mid_price) / mid_price / mid_to_last_secs;
                     
-                    btc_acceleration = Some((velocity_second_half - velocity_first_half) / (duration_secs / 2.0).max(1.0));
+                    asset_acceleration = Some((velocity_second_half - velocity_first_half) / (duration_secs / 2.0).max(1.0));
                 } else {
-                    btc_acceleration = Some(0.0);
+                    asset_acceleration = Some(0.0);
                 }
             } else {
-                btc_change = rb.last_btc_price.map(|last| (btc_price - last) / last);
-                btc_velocity = btc_change;
-                btc_acceleration = Some(0.0);
+                asset_change = rb.last_btc_price.map(|last| (asset_price - last) / last);
+                asset_velocity = asset_change;
+                asset_acceleration = Some(0.0);
             }
         }
         
         let market_slug = market.condition_id.clone();
-        self.event_sender.send(BotEvent::Scanning { bot_id, market_slug: market_slug.clone() }).ok();
+        self.event_sender.send(BotEvent::Scanning { bot_id, market_slug: market_slug.clone(), asset: market.asset.clone() }).ok();
 
         let market_ended = market.time_remaining <= 5;
         let market_changed = rb.last_market_slug.as_ref() != Some(&market_slug);
         
         if market_changed || market_ended {
             if let Some(ref bet) = rb.pending_bet {
-                let diff = (btc_price - bet.start_price) / bet.start_price;
+                // Elszámoláshoz a fogadáskori eszköz árát kérjük le
+                let current_settle_price = crate::api::market::get_asset_price(&bet.asset).await.unwrap_or(asset_price);
+                let diff = (current_settle_price - bet.start_price) / bet.start_price;
 
-                // Helyes Polymarket settlement logika:
-                // Ha van price_to_beat: YES nyer ha final BTC >= price_to_beat
-                // Ha nincs: fallback a BTC irány alapján
                 let won = if let Some(ptb) = bet.price_to_beat {
-                    if bet.side == "YES" { btc_price >= ptb } else { btc_price < ptb }
+                    if bet.side == "YES" { current_settle_price >= ptb } else { current_settle_price < ptb }
                 } else {
                     tracing::error!("[SETTLEMENT] Missing price_to_beat for bot {}. Falling back to start_price. This is mathematically inaccurate!", bot_id);
                     let min_diff = 0.0001_f64;
@@ -384,8 +398,8 @@ impl BotOrchestrator {
                     let icon = if won { "✅" } else { "❌" };
                     let status_text = if won { "NYERT" } else { "VESZTETT" };
                     let msg = format!(
-                        "{} <b>Bot Trade Result</b>\n\nBot: <b>{}</b>\nEredmény: <b>{}</b>\nPnL: <b>${:.2}</b>\nBTC: ${:.2}",
-                        icon, bot.name, status_text, pnl_for_stats, btc_price
+                        "{} <b>Bot Trade Result</b>\n\nBot: <b>{}</b>\nEredmény: <b>{}</b>\nPnL: <b>${:.2}</b>\nÁr: ${:.2} ({})",
+                        icon, bot.name, status_text, pnl_for_stats, current_settle_price, bet.asset
                     );
                     let t = telegram.clone();
                     tokio::spawn(async move {
@@ -406,21 +420,21 @@ impl BotOrchestrator {
             }
             
             if market_changed {
-                rb.btc_window_open = Some(btc_price);
+                rb.btc_window_open = Some(asset_price);
                 rb.last_market_slug = Some(market_slug.clone());
                 tracing::info!("[MARKET] Bot {} new market: {} (time_remaining={}s)", bot_id, market_slug, market.time_remaining);
             }
         }
 
         let ctx = StrategyContext {
-            btc_price,
-            btc_change,
+            btc_price: asset_price,
+            btc_change: asset_change,
             btc_window_open: rb.btc_window_open,
             yes_price: market.yes_price,
             no_price: market.no_price,
             time_remaining: market.time_remaining,
-            btc_velocity: btc_velocity,
-            btc_acceleration: btc_acceleration,
+            btc_velocity: asset_velocity,
+            btc_acceleration: asset_acceleration,
             btc_volatility: if rb.btc_price_history.len() >= 3 {
                 let prices: Vec<f64> = rb.btc_price_history.iter().map(|(p, _)| *p).collect();
                 let returns: Vec<f64> = prices.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
@@ -444,7 +458,8 @@ impl BotOrchestrator {
                     outcome: "HOLD".to_string(), 
                     confidence: 0.0, 
                     bet_size: 0.0, 
-                    reason: reason.clone() 
+                    reason: reason.clone(),
+                    asset: market.asset.clone() 
                 }).ok();
             },
             Signal::Yes(conf) | Signal::No(conf) => {
@@ -483,7 +498,8 @@ impl BotOrchestrator {
                             outcome: "HOLD".to_string(), 
                             confidence: *conf, 
                             bet_size: 0.0, 
-                            reason: format!("RISK BLOCKED: {}", reason) 
+                            reason: format!("RISK BLOCKED: {}", reason),
+                            asset: market.asset.clone() 
                         }).ok();
                     } else {
                         self.event_sender.send(BotEvent::TradeDecision { 
@@ -492,18 +508,27 @@ impl BotOrchestrator {
                             outcome: outcome.to_string(), 
                             confidence: *conf, 
                             bet_size: bot.bet_size, 
-                            reason: "Signal detected & Risk approved".into() 
+                            reason: "Signal detected & Risk approved".into(),
+                            asset: market.asset.clone() 
                         }).ok();
                         
                         if bot.trading_mode == "live" {
                             if let Some(ref cache) = credential_cache {
                                 let c = cache.read().await;
                                 if let Some(creds) = c.get(&user_id) {
+                                    // CRITICAL: Check if the actual price is better than our confidence
+                                    let safety_margin = 0.01;
+                                    let current_quote = if outcome == "YES" { market.yes_price } else { market.no_price };
+                                    if current_quote > (*conf - safety_margin) {
+                                        let msg = format!("ABORT TRADE: Price too high! Quote: {:.2}c, Confidence: {:.2}c (Margin: {:.2}c)", current_quote * 100.0, conf * 100.0, safety_margin * 100.0);
+                                        tracing::warn!("Bot {}: {}", bot_id, msg);
+                                        return Ok(());
+                                    }
                                     let _ = Self::place_order(&market, outcome, bot.bet_size, creds).await;
                                 }
                             }
                         } else {
-                            let d_id = queries::log_trade_decision(&self.db, bot_id, rb.session_id, user_id, &market_slug, &market.condition_id, outcome, &bot.strategy_type, *conf, Some(btc_price), btc_change, Some(market.yes_price), Some(market.no_price), Some(market.time_remaining), "paper trade").await.unwrap_or(0);
+                            let d_id = queries::log_trade_decision(&self.db, bot_id, rb.session_id, user_id, &market_slug, &market.condition_id, outcome, &bot.strategy_type, *conf, Some(asset_price), asset_change, Some(market.yes_price), Some(market.no_price), Some(market.time_remaining), "paper trade").await.unwrap_or(0);
                             
                             let fresh_balance = queries::get_portfolio(&self.db, bot_id, user_id)
                                 .await
@@ -518,8 +543,9 @@ impl BotOrchestrator {
                             
                             rb.pending_bet = Some(PendingBet {
                                 side: outcome.to_string(),
+                                asset: market.asset.clone(),
                                 bet_size: bot.bet_size,
-                                start_price: btc_price,
+                                start_price: asset_price,
                                 entry_price: price,
                                 decision_id: d_id,
                                 price_to_beat: market.price_to_beat,
@@ -530,8 +556,8 @@ impl BotOrchestrator {
                             // Telegram értesítés trade indításról
                             if let Some(ref telegram) = self.telegram_service {
                                 let msg = format!(
-                                    "🚀 <b>Bot Trade Opened</b>\n\nBot: <b>{}</b>\nIrány: <b>{}</b>\nTét: <b>${:.2}</b>\nBTC: ${:.2}",
-                                    bot.name, outcome, bot.bet_size, btc_price
+                                    "🚀 <b>Bot Trade Opened</b>\n\nBot: <b>{}</b>\nIrány: <b>{}</b>\nTét: <b>${:.2}</b>\nÁr: ${:.2} ({})",
+                                    bot.name, outcome, bot.bet_size, asset_price, market.asset
                                 );
                                 let t = telegram.clone();
                                 tokio::spawn(async move {
@@ -546,7 +572,7 @@ impl BotOrchestrator {
             }
         }
 
-        rb.last_btc_price = Some(btc_price);
+        rb.last_btc_price = Some(asset_price);
         
         {
             let mut running = self.running_bots.write().await;
@@ -563,13 +589,6 @@ impl BotOrchestrator {
             }
         }
         Ok(())
-    }
-
-    async fn fetch_btc_price(&self) -> Result<f64, String> {
-        let resp = reqwest::get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT").await.map_err(|e| e.to_string())?;
-        #[derive(serde::Deserialize)] struct BP { price: String }
-        let data: BP = resp.json().await.map_err(|e| e.to_string())?;
-        data.price.parse::<f64>().map_err(|e| e.to_string())
     }
 
     async fn place_order(market: &crate::api::market::ActiveMarket, outcome: &str, bet_size: f64, creds: &CachedCredentials) -> Result<String, String> {

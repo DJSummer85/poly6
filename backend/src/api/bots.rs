@@ -28,6 +28,7 @@ pub struct BotResponse {
     pub stop_loss: f64, pub take_profit: f64, pub total_trades: i64, pub winning_trades: i64,
     pub losing_trades: i64, pub win_rate: f64, pub trading_mode: String,
     pub pnl_history: Vec<f64>,
+    pub asset: String,
 }
 
 impl BotResponse {
@@ -38,6 +39,8 @@ impl BotResponse {
             .map(|d| d.pnl.unwrap_or(0.0))
             .collect();
             
+        let asset = derive_asset(&r.market_id);
+            
         Self {
             id: r.id, name: r.name, market_id: r.market_id, strategy_type: r.strategy_type,
             params: r.params, status: r.status, created_at: r.created_at, bet_size: r.bet_size,
@@ -46,8 +49,19 @@ impl BotResponse {
             total_trades: r.total_trades, winning_trades: r.winning_trades, losing_trades: r.losing_trades,
             win_rate: r.win_rate, trading_mode: r.trading_mode,
             pnl_history: history,
+            asset,
         }
     }
+}
+
+fn derive_asset(market_id: &str) -> String {
+    let lower = market_id.to_lowercase();
+    if lower.contains("btc") { "BTC".to_string() }
+    else if lower.contains("eth") { "ETH".to_string() }
+    else if lower.contains("sol") { "SOL".to_string() }
+    else if lower.contains("xrp") { "XRP".to_string() }
+    else if lower == "auto" { "AUTO".to_string() }
+    else { "BTC".to_string() }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

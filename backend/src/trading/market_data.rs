@@ -161,7 +161,7 @@ impl MarketDataService {
             .await
             .map_err(|e| format!("Binance ticker request failed: {}", e))?;
 
-        let btc_change_24h = if ticker_response.status().is_success() {
+        let _btc_change_24h = if ticker_response.status().is_success() {
             #[derive(serde::Deserialize)]
             struct BinanceTicker {
                 #[serde(rename = "priceChangePercent")]
@@ -178,7 +178,7 @@ impl MarketDataService {
             None
         };
 
-        Ok((btc_price, btc_change_24h, None, None, None, None))
+        Ok((btc_price, None, None, None, None, None))
     }
 }
 

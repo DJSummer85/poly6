@@ -82,7 +82,7 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
     let public_routes = Router::new()
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
-        .route("/market/btc-price", get(market::get_btc_price))
+        .route("/market/btc-price", get(market::get_btc_price_handler))
         .route("/market/price", get(market::get_market_price))
         .route("/market/list", get(market::list_markets))
         .route("/market/active", get(market::get_active_markets))

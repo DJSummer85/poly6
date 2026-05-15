@@ -143,6 +143,11 @@ export function BotThoughts({ isOpen, onClose }: BotThoughtsProps) {
                       }`}
                     >
                       <span className="mr-2 opacity-30 text-[#00ff41]">&gt;</span>
+                      {t.asset && (
+                        <span className="mr-2 px-1 py-0 border border-[#00ff41]/30 rounded text-[9px] font-bold text-[#00ff41] bg-[#00ff41]/5">
+                          {t.asset}
+                        </span>
+                      )}
                       {t.text}
                     </div>
                   </motion.div>

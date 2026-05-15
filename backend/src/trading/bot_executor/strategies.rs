@@ -142,6 +142,12 @@ impl StrategyExecutor {
     }
 
     pub fn evaluate_with_context(&self, ctx: StrategyContext) -> Signal {
+        if ctx.btc_price == 0.0 {
+            return Signal::Hold("No price data".into());
+        }
+        
+        // Wait for at least some history if we need change (handled in strategies)
+        
         match self.strategy_type.as_str() {
             "window_delta" => self.evaluate_window_delta(ctx),
             "binance_signal" | "oracle_lag" => self.evaluate_oracle_lag(ctx),
@@ -282,19 +288,22 @@ impl StrategyExecutor {
             None => return Signal::Hold("No BTC data".to_string()),
         };
 
-        // Revised: threshold = min_delta * 1.2 - fee is EV-based, not BTC filter
+        // Overextended filter: if move is > 0.30%, it's likely to revert
+        let overextended_threshold = 0.0030;
         let threshold = self.params.min_delta * 1.2;
-
-        // Polymarket fee (2% of winnings) - applied to confidence, not BTC threshold
         let polymarket_fee_rate = 0.02;
 
+        if change.abs() > overextended_threshold {
+            return Signal::Hold(format!("Overextended: {:.3}%", change * 100.0));
+        }
+
         if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            // Raw confidence from move magnitude, EV-adjusted for fee
-            let raw_confidence = (0.55_f64 + change.abs() * 50.0).min(0.80_f64);
+            // Raw confidence from move magnitude, slightly more aggressive baseline
+            let raw_confidence = (0.56_f64 + change.abs() * 45.0).min(0.82_f64);
             let confidence = raw_confidence * (1.0 - polymarket_fee_rate);
             Signal::Yes(confidence)
         } else if change < -threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let raw_confidence = (0.55_f64 + change.abs() * 50.0).min(0.80_f64);
+            let raw_confidence = (0.54_f64 + change.abs() * 40.0).min(0.78_f64);
             let confidence = raw_confidence * (1.0 - polymarket_fee_rate);
             Signal::No(confidence)
         } else {

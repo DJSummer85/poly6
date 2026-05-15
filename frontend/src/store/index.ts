@@ -112,6 +112,7 @@ interface AppState {
     botName: string;
     text: string;
     type: "info" | "success" | "warn" | "error";
+    asset?: string;
     timestamp: number;
   }>;
   addThought: (thought: Omit<AppState["thoughts"][number], "id">) => void;

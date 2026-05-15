@@ -1,7 +1,7 @@
 "use client";
 
-import { AlertTriangle, Crosshair, Loader2, X } from "lucide-react";
-import { useState } from "react";
+import { AlertTriangle, ArrowDownAZ, ArrowDownNarrowWide, ArrowUpNarrowWide, ChevronDown, Crosshair, Loader2, X } from "lucide-react";
+import { useState, useMemo } from "react";
 import { toast } from "sonner";
 import { useBots, useStartBot, useStopBot } from "@/hooks";
 import { apiFetch } from "@/lib/utils";
@@ -64,14 +64,26 @@ function LiveModeConfirmDialog({
 }
 
 export function BotSelector() {
+  const { bots: liveBots, setBots } = useAppStore();
   const { data: botsFromApi, isLoading, isFetching } = useBots();
   const { selectedBotIds, setSelectedBotIds, tradingMode } = useAppStore();
+
+  // Sync API bots to store if store is empty or when API data changes
+  useMemo(() => {
+    if (botsFromApi && botsFromApi.length > 0) {
+      setBots(botsFromApi);
+    }
+  }, [botsFromApi, setBots]);
+
   const startBotMutation = useStartBot();
   const stopBotMutation = useStopBot();
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [confirmBot, setConfirmBot] = useState<{ id: number; name: string } | null>(null);
+  const [sortBy, setSortBy] = useState<"name" | "pnl" | "wr" | "balance" | "roi">("pnl");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+  const [isSortOpen, setIsSortOpen] = useState(false);
 
-  const botList = botsFromApi ?? [];
+  const botList = liveBots.length > 0 ? liveBots : (botsFromApi ?? []);
   const isMutating = startBotMutation.isPending || stopBotMutation.isPending;
 
   // Filter bots by trading mode
@@ -139,8 +151,46 @@ export function BotSelector() {
     }
   };
 
-  const runningBots = filteredBots.filter((b) => b.status === "running");
-  const idleBots = filteredBots.filter((b) => b.status !== "running");
+  // Sort bots
+  const sortedBots = useMemo(() => {
+    return [...botList].sort((a, b) => {
+      let valA: any = 0;
+      let valB: any = 0;
+
+      switch (sortBy) {
+        case "name":
+          valA = a.name.toLowerCase();
+          valB = b.name.toLowerCase();
+          break;
+        case "pnl":
+          valA = a.pnl ?? 0;
+          valB = b.pnl ?? 0;
+          break;
+        case "wr":
+          valA = a.win_rate ?? 0;
+          valB = b.win_rate ?? 0;
+          break;
+        case "balance":
+          valA = a.bet_size; // Placeholder for actual balance if not in bot object
+          valB = b.bet_size;
+          break;
+        case "roi":
+          valA = (a.pnl ?? 0) / (a.trades_count || 1);
+          valB = (b.pnl ?? 0) / (b.trades_count || 1);
+          break;
+        default:
+          valA = a.id;
+          valB = b.id;
+      }
+
+      if (valA < valB) return sortDirection === "asc" ? -1 : 1;
+      if (valA > valB) return sortDirection === "asc" ? 1 : -1;
+      return 0;
+    });
+  }, [botList, sortBy, sortDirection]);
+
+  const runningBots = sortedBots.filter((b) => b.status === "running");
+  const idleBots = sortedBots.filter((b) => b.status !== "running");
 
   if (isLoading) {
     return (
@@ -208,7 +258,55 @@ export function BotSelector() {
               </span>
             </div>
           </div>
-          {isFetching && !isLoading && <Loader2 className="h-3.5 w-3.5 text-zinc-600 animate-spin" />}
+          <div className="flex items-center gap-2">
+            {isFetching && !isLoading && <Loader2 className="h-3.5 w-3.5 text-zinc-600 animate-spin" />}
+            
+            <div className="relative">
+              <button 
+                onClick={() => setIsSortOpen(!isSortOpen)}
+                className="flex items-center gap-1.5 rounded-lg border border-white/5 bg-white/5 px-2 py-1 text-[10px] font-medium text-zinc-400 hover:bg-white/10 transition-colors"
+              >
+                <ArrowDownNarrowWide className="h-3 w-3" />
+                <span>Rendezés</span>
+                <ChevronDown className={`h-2.5 w-2.5 transition-transform ${isSortOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {isSortOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setIsSortOpen(false)} />
+                  <div className="absolute right-0 mt-1.5 z-50 w-36 rounded-xl border border-white/10 bg-zinc-900 p-1 shadow-2xl backdrop-blur-xl">
+                    {[
+                      { id: "pnl", label: "Profit (PnL)", icon: ArrowDownNarrowWide },
+                      { id: "wr", label: "Win Rate", icon: ArrowUpNarrowWide },
+                      { id: "roi", label: "ROI %", icon: ArrowUpNarrowWide },
+                      { id: "name", label: "Név (ABC)", icon: ArrowDownAZ },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        onClick={() => {
+                          if (sortBy === opt.id) {
+                            setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+                          } else {
+                            setSortBy(opt.id as any);
+                            setSortDirection("desc");
+                          }
+                          setIsSortOpen(false);
+                        }}
+                        className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-[11px] transition-colors ${
+                          sortBy === opt.id ? "bg-indigo-500/10 text-indigo-400" : "text-zinc-400 hover:bg-white/5"
+                        }`}
+                      >
+                        <span>{opt.label}</span>
+                        {sortBy === opt.id && (
+                          sortDirection === "desc" ? <ArrowDownNarrowWide className="h-3 w-3" /> : <ArrowUpNarrowWide className="h-3 w-3" />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Live mode warning */}
@@ -223,7 +321,6 @@ export function BotSelector() {
         {/* Bot list */}
         <div
           className="px-2 pb-3 overflow-y-auto flex-1 space-y-0.5"
-          style={{ maxHeight: "calc(100vh - 280px)" }}
         >
           {runningBots.length > 0 && (
             <>

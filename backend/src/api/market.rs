@@ -307,10 +307,23 @@ pub async fn fetch_market_by_slug(slug: &str, asset: &str, timeframe: &str) -> O
                 .and_then(|p| serde_json::from_str(p).ok())
                 .unwrap_or_else(|| vec!["0.5".to_string(), "0.5".to_string()]);
 
-            let yes_price = outcome_prices.first()
+            // Match prices to outcomes correctly
+            let outcomes: Vec<String> = market.tokens.as_ref()
+                .map(|t| t.iter().filter_map(|tok| tok.outcome.clone()).collect())
+                .unwrap_or_else(|| vec!["Up".into(), "Down".into()]);
+            
+            let up_index = outcomes.iter()
+                .position(|o| o == "Up" || o == "Long" || o.to_lowercase().contains("up") || o == "Yes")
+                .unwrap_or(0);
+                
+            let yes_price = outcome_prices.get(up_index)
                 .and_then(|p| p.parse::<f64>().ok())
                 .unwrap_or(0.5);
-            let no_price = 1.0 - yes_price;
+            
+            let no_index = if up_index == 0 { 1 } else { 0 };
+            let no_price = outcome_prices.get(no_index)
+                .and_then(|p| p.parse::<f64>().ok())
+                .unwrap_or(1.0 - yes_price);
 
             // Calculate start time from end time and duration
             let duration_secs = get_duration_for_timeframe(timeframe);
@@ -469,12 +482,19 @@ pub async fn get_active_markets(
     }).into_response()
 }
 
-/// API endpoint: Get current BTC price from Binance
-pub async fn get_btc_price() -> Response {
+/// API endpoint: Get current price for any supported asset from Binance
+pub async fn get_asset_price(asset: &str) -> Result<f64, String> {
     let client = reqwest::Client::new();
+    let symbol = match asset.to_uppercase().as_str() {
+        "BTC" => "BTCUSDT",
+        "ETH" => "ETHUSDT",
+        "SOL" => "SOLUSDT",
+        "XRP" => "XRPUSDT",
+        _ => "BTCUSDT",
+    };
 
     match client
-        .get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
+        .get(format!("https://api.binance.com/api/v3/ticker/price?symbol={}", symbol))
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
@@ -487,22 +507,29 @@ pub async fn get_btc_price() -> Response {
 
             if let Ok(data) = resp.json::<BinancePrice>().await {
                 if let Ok(price) = data.price.parse::<f64>() {
-                    return Json(BitcoinPriceResponse {
-                        success: true,
-                        price: Some(price),
-                        error: None,
-                    }).into_response();
+                    return Ok(price);
                 }
             }
         }
         _ => {}
     }
 
-    Json(BitcoinPriceResponse {
-        success: false,
-        price: None,
-        error: Some("Failed to fetch BTC price".to_string()),
-    }).into_response()
+    Err(format!("Failed to fetch {} price", asset))
+}
+
+pub async fn get_btc_price_handler() -> Response {
+    match get_asset_price("BTC").await {
+        Ok(price) => Json(BitcoinPriceResponse {
+            success: true,
+            price: Some(price),
+            error: None,
+        }).into_response(),
+        Err(e) => Json(BitcoinPriceResponse {
+            success: false,
+            price: None,
+            error: Some(e),
+        }).into_response(),
+    }
 }
 
 /// API endpoint: Get Polymarket YES/NO price for a token

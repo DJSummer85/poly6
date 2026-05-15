@@ -290,11 +290,11 @@ impl StrategyExecutor {
 
         if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
             // Raw confidence from move magnitude, EV-adjusted for fee
-            let raw_confidence = (0.60_f64 + change.abs() * 100.0).min(0.85_f64);
+            let raw_confidence = (0.55_f64 + change.abs() * 50.0).min(0.80_f64);
             let confidence = raw_confidence * (1.0 - polymarket_fee_rate);
             Signal::Yes(confidence)
         } else if change < -threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let raw_confidence = (0.60_f64 + change.abs() * 100.0).min(0.85_f64);
+            let raw_confidence = (0.55_f64 + change.abs() * 50.0).min(0.80_f64);
             let confidence = raw_confidence * (1.0 - polymarket_fee_rate);
             Signal::No(confidence)
         } else {
@@ -315,10 +315,10 @@ impl StrategyExecutor {
         let threshold = self.params.min_delta * 1.5;
 
         if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.60_f64 + change * 120.0).min(0.82_f64);
+            let confidence = (0.55_f64 + change * 60.0).min(0.80_f64);
             Signal::Yes(confidence)
         } else if change < -threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.60_f64 + change.abs() * 120.0).min(0.82_f64);
+            let confidence = (0.55_f64 + change.abs() * 60.0).min(0.80_f64);
             Signal::No(confidence)
         } else {
             Signal::Hold(format!("No strong trend: {:.4}%", change * 100.0))
@@ -679,8 +679,8 @@ impl StrategyExecutor {
             if ctx.yes_price > 0.60 {
                 return Signal::Hold(format!("YES price too high: {:.0}c", ctx.yes_price * 100.0));
             }
-            let confidence = (0.75_f64 + change * 300.0).min(0.92_f64);
-            if confidence >= 0.75 {
+            let confidence = (0.65_f64 + change * 150.0).min(0.88_f64);
+            if confidence >= 0.70 {
                 return Signal::Yes(confidence);
             }
             return Signal::Hold(format!("Confidence too low: {:.2}", confidence));
@@ -690,8 +690,8 @@ impl StrategyExecutor {
             if ctx.no_price > 0.60 {
                 return Signal::Hold(format!("NO price too high: {:.0}c", ctx.no_price * 100.0));
             }
-            let confidence = (0.75_f64 + change.abs() * 300.0).min(0.92_f64);
-            if confidence >= 0.75 {
+            let confidence = (0.65_f64 + change.abs() * 150.0).min(0.88_f64);
+            if confidence >= 0.70 {
                 return Signal::No(confidence);
             }
             return Signal::Hold(format!("Confidence too low: {:.2}", confidence));

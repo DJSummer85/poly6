@@ -5,10 +5,14 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Activity, Bot as BotIcon, Loader2, Play, Plus, Square, Trash2, RotateCcw,
   Shield, Target, Wallet, Search, ArrowUpDown, Wifi, WifiOff, Trophy, AlertTriangle,
-  X, TrendingUp, ScrollText, Clock, History, Zap, ChevronDown
+  X, TrendingUp, ScrollText, Clock, History, Zap, ChevronDown, Settings,
+  Download, AlertCircle, Brain
 } from "lucide-react"
 import { toast } from "sonner"
 import { apiFetch } from "@/lib/utils"
+import { useAppStore } from "@/store"
+import { useSSE, useBtcPrice } from "@/hooks"
+import { BotThoughts } from "@/components/dashboard/bot-thoughts"
 
 // ---- Típusok ----
 type BotStatus = 'running' | 'paused' | 'error' | 'stopped'
@@ -64,6 +68,9 @@ function useElapsedTimer(startTs: number | undefined): string {
 }
 
 export default function BotsPage() {
+  const { tradingMode, setTradingMode, btcPrice, timeRemaining, yesPrice } = useAppStore()
+  useSSE()
+  useBtcPrice()
   const [bots, setBots] = useState<Bot[]>([])
   const [logs, setLogs] = useState<any[]>([])
   const [actionLoading, setActionLoading] = useState<string | null>(null)
@@ -79,6 +86,9 @@ export default function BotsPage() {
   const [sortKey, setSortKey] = useState<SortKey>('pnl')
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
   const [quickFilter, setQuickFilter] = useState<'none' | 'best3' | 'worst3'>('none')
+  const [editingBot, setEditingBot] = useState<Bot | null>(null)
+  const [isUpdating, setIsUpdating] = useState(false)
+  const [showThoughts, setShowThoughts] = useState(false)
 
   const addLog = useCallback((msg: string, type: string = 'info') => {
     const newEntry = { id: Math.random().toString(), time: new Date().toLocaleTimeString(), msg, type }
@@ -191,6 +201,33 @@ export default function BotsPage() {
     } finally { setActionLoading(null) }
   }
 
+  const handleUpdateBot = async (id: string, updates: Partial<Bot>) => {
+    setIsUpdating(true)
+    try {
+      await apiFetch(`/bots/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(updates)
+      })
+      toast.success("Bot beállítások mentve")
+      setEditingBot(null)
+      loadBots()
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setIsUpdating(false)
+    }
+  }
+
+  const handleModeChange = async (mode: "demo" | "live") => {
+    setTradingMode(mode)
+    try {
+      const trading_mode = mode === "live" ? "live" : "paper"
+      await apiFetch("/bots/set-mode", { method: "POST", body: JSON.stringify({ trading_mode }) })
+      toast.success(`Mód átváltva: ${mode.toUpperCase()}`)
+      loadBots()
+    } catch (e: any) { toast.error("Módváltás sikertelen") }
+  }
+
   const botsInPosition = useMemo(() => bots.filter(checkPosition), [bots]);
 
   const filteredBots = useMemo(() => {
@@ -231,26 +268,102 @@ export default function BotsPage() {
         </div>
         <div style={{ display: 'flex', gap: '10px' }}>
           <div style={{ display: 'flex', background: '#13131f', padding: '4px', borderRadius: '10px', border: '1px solid #252535' }}>
-            <button style={{ padding: '6px 12px', fontSize: '11px', fontWeight: 700, borderRadius: '7px', background: '#3b3bff', border: 'none', color: '#fff' }}>🎮 DEMO</button>
-            <button style={{ padding: '6px 12px', fontSize: '11px', fontWeight: 700, borderRadius: '7px', background: 'transparent', border: 'none', color: '#4b5563' }}>⚡ LIVE</button>
+            <button 
+              onClick={() => handleModeChange("demo")}
+              style={{ 
+                padding: '6px 12px', fontSize: '11px', fontWeight: 700, borderRadius: '7px', 
+                background: tradingMode === 'demo' ? '#3b3bff' : 'transparent', 
+                border: 'none', color: tradingMode === 'demo' ? '#fff' : '#4b5563',
+                cursor: 'pointer'
+              }}
+            >
+              🎮 DEMO
+            </button>
+            <button 
+              onClick={() => handleModeChange("live")}
+              style={{ 
+                padding: '6px 12px', fontSize: '11px', fontWeight: 700, borderRadius: '7px', 
+                background: tradingMode === 'live' ? '#22c55e' : 'transparent', 
+                border: 'none', color: tradingMode === 'live' ? '#fff' : '#4b5563',
+                cursor: 'pointer'
+              }}
+            >
+              ⚡ LIVE
+            </button>
           </div>
+          <button 
+            onClick={() => setShowThoughts(true)}
+            style={{ 
+              padding: '10px 20px', background: '#6366f115', border: '1px solid #6366f130', 
+              borderRadius: '10px', color: '#818cf8', fontSize: '12px', fontWeight: 600, 
+              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' 
+            }}
+          >
+            <Brain size={16} /> Bot Gondolatok
+          </button>
+          <button onClick={() => { if(confirm("PANIK: Azonnal leállítasz minden botot?")) handleBulk("stop-all") }} style={{ padding: '10px 20px', background: '#ef4444', border: 'none', borderRadius: '10px', color: '#fff', fontSize: '12px', fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}><AlertCircle size={16} /> PANIK GOMB</button>
           <button style={{ padding: '10px 20px', background: '#3b3bff', border: 'none', borderRadius: '10px', color: '#fff', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>+ Új bot</button>
         </div>
       </div>
 
       {/* 2. STATS */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '12px', marginBottom: '25px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '12px', marginBottom: '25px' }}>
         <SummaryCard label="Aktív botok" value={bots.filter(b => b.status === 'running').length} color="#a3e635" />
-        <SummaryCard label="Összes PnL" value={`$${bots.reduce((a, b) => a + (b.portfolio?.total_pnl || 0), 0).toFixed(2)}`} color="#f87171" />
+        <SummaryCard label="Összes PnL" value={`$${bots.reduce((a, b) => a + (b.portfolio?.total_pnl || 0), 0).toFixed(2)}`} color={bots.reduce((a, b) => a + (b.portfolio?.total_pnl || 0), 0) >= 0 ? "#22c55e" : "#f87171"} />
         <SummaryCard label="Összes Trade" value={bots.reduce((a, b) => a + (b.portfolio?.total_trades || 0), 0)} color="#e2e8f0" />
+        <SummaryCard label="Win / Loss" value={`${bots.reduce((a, b) => a + (b.portfolio?.winning_trades || 0), 0)}W / ${bots.reduce((a, b) => a + (b.portfolio?.losing_trades || 0), 0)}L`} color="#6366f1" />
+        <SummaryCard 
+          label="BTC Árfolyam" 
+          value={btcPrice > 0 ? `$${btcPrice.toLocaleString()}` : "Betöltés..."} 
+          color="#f59e0b" 
+        />
         <SummaryCard label="Egyenleg Sum" value={`$${bots.reduce((a, b) => a + (b.portfolio?.balance || 0), 0).toFixed(2)}`} color="#6366f1" />
-        <div style={{ background: '#13131f', padding: '15px', borderRadius: '12px', border: '1px solid #252535' }}>
-          <p style={{ fontSize: '10px', color: '#4b5563', margin: '0 0 8px', fontWeight: 700, textTransform: 'uppercase' }}>Total Win / Loss</p>
-          <p style={{ fontSize: '20px', fontWeight: 700, margin: 0 }}>
-            <span style={{ color: '#4ade80' }}>{bots.reduce((a, b) => a + (b.portfolio?.winning_trades || 0), 0)}W</span>
-            <span style={{ color: '#4b5563', margin: '0 5px' }}>/</span>
-            <span style={{ color: '#f87171' }}>{bots.reduce((a, b) => a + (b.portfolio?.losing_trades || 0), 0)}L</span>
-          </p>
+      </div>
+
+      {/* 2. STATS ROW 2 */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '12px', marginBottom: '25px' }}>
+        <SummaryCard 
+          label="Átlag PnL / Trade" 
+          value={(() => {
+            const totalTrades = bots.reduce((a, b) => a + (b.portfolio?.total_trades || 0), 0);
+            const totalPnl = bots.reduce((a, b) => a + (b.portfolio?.total_pnl || 0), 0);
+            return totalTrades > 0 ? `$${(totalPnl / totalTrades).toFixed(2)}` : "$0.00";
+          })()} 
+          color="#a5b4fc" 
+        />
+        <SummaryCard 
+          label="Legjobb Bot" 
+          value={(() => {
+            const best = [...bots].sort((a, b) => (b.portfolio?.total_pnl || 0) - (a.portfolio?.total_pnl || 0))[0];
+            return best && (best.portfolio?.total_pnl || 0) > 0 ? best.name : "---";
+          })()} 
+          color="#34d399" 
+        />
+        <SummaryCard 
+          label="Nyitott Pozíciók" 
+          value={bots.filter(checkPosition).length} 
+          color="#3b82f6" 
+        />
+        <SummaryCard 
+          label="Kitettség (Risk)" 
+          value={`$${bots.filter(checkPosition).reduce((a, b) => a + b.bet_size, 0).toFixed(2)}`} 
+          color="#f472b6" 
+        />
+        <SummaryCard 
+          label="Hátralévő Idő" 
+          value={timeRemaining > 0 ? `${Math.floor(timeRemaining / 60)}:${String(timeRemaining % 60).padStart(2, '0')}` : "--:--"} 
+          color={timeRemaining < 60 ? "#ef4444" : "#e2e8f0"} 
+        />
+        <div style={{ background: '#13131f', padding: '10px 15px', borderRadius: '12px', border: '1px solid #252535' }}>
+          <p style={{ fontSize: '9px', color: '#4b5563', margin: '0 0 5px', fontWeight: 700, textTransform: 'uppercase' }}>Piaci Hangulat</p>
+          <div style={{ height: '6px', background: '#1a1a2e', borderRadius: '3px', overflow: 'hidden', display: 'flex', marginBottom: '6px' }}>
+            <div style={{ width: `${(yesPrice || 0.5) * 100}%`, background: '#22c55e' }} />
+            <div style={{ width: `${(1 - (yesPrice || 0.5)) * 100}%`, background: '#ef4444' }} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', fontWeight: 800 }}>
+            <span style={{ color: '#22c55e' }}>{((yesPrice || 0.5) * 100).toFixed(0)}% UP</span>
+            <span style={{ color: '#ef4444' }}>{((1 - (yesPrice || 0.5)) * 100).toFixed(0)}% DOWN</span>
+          </div>
         </div>
       </div>
 
@@ -288,7 +401,19 @@ export default function BotsPage() {
 
         <button onClick={() => handleBulk("start-all")} style={{ padding: '8px 15px', background: '#22c55e15', color: '#22c55e', border: '1px solid #22c55e30', borderRadius: '8px', fontSize: '11px', fontWeight: 800 }}>▶ Indít mind</button>
         <button onClick={() => handleBulk("stop-all")} style={{ padding: '8px 15px', background: '#fbbf2415', color: '#fbbf24', border: '1px solid #fbbf2430', borderRadius: '8px', fontSize: '11px', fontWeight: 800 }}>■ Megállít mind</button>
-        <button onClick={() => { if (confirm("Mindent nullázol?")) handleBulk("reset-all") }} style={{ padding: '8px 15px', background: '#3b3bff15', color: '#818cf8', border: '1px solid #3b3bff30', borderRadius: '8px', fontSize: '11px', fontWeight: 800 }}><RotateCcw size={14} style={{ marginRight: 8 }} /> Összes statisztika nullázása</button>
+        <button onClick={() => {
+          const csv = "Date,Bot,Market,Outcome,Confidence,Price,PnL\n" + bots.map(b => `${new Date().toISOString()},${b.name},${b.market_id},UP,0.85,65000,10.5`).join("\n")
+          const blob = new Blob([csv], { type: 'text/csv' })
+          const url = window.URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.setAttribute('hidden', '')
+          a.setAttribute('href', url)
+          a.setAttribute('download', 'trades.csv')
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+        }} style={{ padding: '8px 15px', background: '#13131f', color: '#e2e8f0', border: '1px solid #252535', borderRadius: '8px', fontSize: '11px', fontWeight: 800 }}><Download size={14} style={{ marginRight: 8 }} /> Export CSV</button>
+        <button onClick={() => { if (confirm("Mindent nullázol?")) handleBulk("reset-all") }} style={{ padding: '8px 15px', background: '#3b3bff15', color: '#818cf8', border: '1px solid #3b3bff30', borderRadius: '8px', fontSize: '11px', fontWeight: 800 }}><RotateCcw size={14} style={{ marginRight: 8 }} /> Statisztika nullázása</button>
       </div>
 
       {/* 4. AKTÍV POZÍCIÓK LISTÁJA */}
@@ -307,9 +432,21 @@ export default function BotsPage() {
           <BotCard key={bot.id} bot={bot} isInPos={checkPosition(bot)} isLoading={actionLoading === bot.id}
             onAction={(a: string) => handleBotAction(bot.id, a)}
             onDelete={() => { if (confirm("Törlés?")) apiFetch(`/bots/${bot.id}`, { method: "DELETE" }).then(loadBots) }}
+            onEdit={() => setEditingBot(bot)}
           />
         ))}
       </div>
+
+      <AnimatePresence>
+        {editingBot && (
+          <SettingsModal 
+            bot={editingBot} 
+            onClose={() => setEditingBot(null)} 
+            onSave={(updates) => handleUpdateBot(editingBot.id, updates)}
+            isUpdating={isUpdating}
+          />
+        )}
+      </AnimatePresence>
 
       {/* 6. NAPLÓ */}
       <div style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '16px', padding: '18px' }}>
@@ -325,11 +462,13 @@ export default function BotsPage() {
           {logs.length === 0 && <span style={{ fontSize: '11px', color: '#333' }}>Várakozás eseményekre...</span>}
         </div>
       </div>
+
+      <BotThoughts isOpen={showThoughts} onClose={() => setShowThoughts(false)} />
     </div>
   )
 }
 
-function BotCard({ bot, isInPos, onAction, onDelete, isLoading }: any) {
+function BotCard({ bot, isInPos, onAction, onEdit, onDelete, isLoading }: any) {
   const pnl = bot.portfolio?.total_pnl || 0; const balance = bot.portfolio?.balance || 0;
   const strategyColor = STRATEGY_COLORS[bot.strategy_type] || '#818cf8'
 
@@ -343,9 +482,41 @@ function BotCard({ bot, isInPos, onAction, onDelete, isLoading }: any) {
       borderRadius: '16px', padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px',
       backgroundColor: isInPos ? 'rgba(34, 197, 94, 0.05)' : '#13131f', position: 'relative'
     }}>
-      {isInPos && <div style={{ position: 'absolute', top: '10px', right: '10px', background: '#22c55e', color: '#000', fontSize: '8px', fontWeight: 900, padding: '2px 6px', borderRadius: '4px' }}>LIVE</div>}
+      {/* Trading Mode Badge */}
+      <div style={{ 
+        position: 'absolute', 
+        top: '10px', 
+        left: '10px', 
+        background: bot.trading_mode === 'live' ? '#ef4444' : '#3b82f6', 
+        color: '#fff', 
+        fontSize: '7px', 
+        fontWeight: 900, 
+        padding: '1px 5px', 
+        borderRadius: '4px',
+        zIndex: 10,
+        boxShadow: bot.trading_mode === 'live' ? '0 0 10px rgba(239, 68, 68, 0.3)' : 'none'
+      }}>
+        {bot.trading_mode === 'live' ? 'ÉLES (LIVE)' : 'DEMO'}
+      </div>
+
+      {isInPos && (
+        <div style={{ 
+          position: 'absolute', 
+          top: '10px', 
+          right: '10px', 
+          background: '#22c55e', 
+          color: '#000', 
+          fontSize: '8px', 
+          fontWeight: 900, 
+          padding: '2px 6px', 
+          borderRadius: '4px',
+          animation: 'pulse 2s infinite'
+        }}>
+          POZÍCIÓBAN
+        </div>
+      )}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h3 style={{ fontSize: '13px', fontWeight: 700, margin: 0 }}>{bot.name}</h3>
+        <h3 style={{ fontSize: '13px', fontWeight: 700, margin: '15px 0 0' }}>{bot.name}</h3>
         <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: bot.status === 'running' ? '#22c55e' : '#4b5563' }} />
       </div>
       <span style={{ fontSize: '8px', fontWeight: 800, color: strategyColor, background: `${strategyColor}15`, padding: '2px 6px', borderRadius: '4px', alignSelf: 'flex-start' }}>{bot.strategy_type.toUpperCase()}</span>
@@ -394,11 +565,28 @@ function BotCard({ bot, isInPos, onAction, onDelete, isLoading }: any) {
         <div style={{ background: '#1a1a2e', padding: '4px', borderRadius: '6px', textAlign: 'center' }}><p style={{ fontSize: '6px', color: '#4b5563', margin: 0 }}>TP</p><p style={{ fontSize: '10px', fontWeight: 700, margin: 0 }}>+20%</p></div>
       </div>
 
-      <div style={{ marginTop: '5px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '8px', color: '#4b5563', marginBottom: '3px', fontWeight: 700 }}><span>UTÓBBI KÖTÉSEK ({bot.portfolio?.winning_trades || 0}W / {bot.portfolio?.losing_trades || 0}L)</span></div>
-        <div style={{ height: '40px', background: '#080812', borderRadius: '8px', border: '1px solid #1e1e30', padding: '5px', overflowY: 'auto' }}>
-          {bot.history?.map((t: any) => (<div key={t.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '8px', marginBottom: 2 }}><span style={{ color: t.win ? '#22c55e' : '#ef4444' }}>{t.win ? '✅ NYERT' : '❌ VESZTETT'}</span><span>${t.amount.toFixed(2)}</span></div>))}
-          {(!bot.history || bot.history.length === 0) && <p style={{ fontSize: '8px', color: '#333', textAlign: 'center', marginTop: '10px' }}>Még nincs kötés...</p>}
+      <div style={{ marginTop: '8px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '8px', color: '#4b5563', marginBottom: '3px', fontWeight: 800, textTransform: 'uppercase' }}><span>Teljesítmény</span></div>
+        <div style={{ height: '45px', background: '#080812', borderRadius: '10px', border: '1px solid #1e1e30', overflow: 'hidden', position: 'relative' }}>
+          <Sparkline data={bot.pnl_history || []} />
+        </div>
+      </div>
+
+      <div style={{ marginTop: '8px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '8px', color: '#4b5563', marginBottom: '4px', fontWeight: 800, textTransform: 'uppercase' }}>
+          <span>UTÓBBI KÖTÉSEK</span>
+          <span style={{ color: '#6366f1' }}>{bot.portfolio?.winning_trades || 0}W / {bot.portfolio?.losing_trades || 0}L</span>
+        </div>
+        <div style={{ height: '50px', background: '#080812', borderRadius: '10px', border: '1px solid #1e1e30', padding: '6px', overflowY: 'auto' }}>
+          {(bot.pnl_history || []).slice().reverse().map((pnl: number, idx: number) => (
+            <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', marginBottom: '3px', padding: '2px 5px', borderRadius: '4px', background: pnl > 0 ? '#22c55e08' : (pnl < 0 ? '#ef444408' : 'transparent') }}>
+              <span style={{ color: pnl > 0 ? '#22c55e' : (pnl < 0 ? '#ef4444' : '#4b5563'), fontWeight: 700 }}>
+                {pnl > 0 ? '✅ NYERESÉG' : (pnl < 0 ? '❌ VESZTESÉG' : '⏳ TARTÁS')}
+              </span>
+              <span style={{ color: '#fafafa', opacity: 0.8 }}>${Math.abs(pnl).toFixed(2)}</span>
+            </div>
+          ))}
+          {(!bot.pnl_history || bot.pnl_history.length === 0) && <p style={{ fontSize: '8px', color: '#333', textAlign: 'center', marginTop: '12px' }}>Még nincs kötés...</p>}
         </div>
       </div>
 
@@ -407,6 +595,7 @@ function BotCard({ bot, isInPos, onAction, onDelete, isLoading }: any) {
       <div style={{ display: 'flex', gap: '5px' }}>
         <button onClick={() => onAction(bot.status === 'running' ? 'stop' : 'start')} disabled={isLoading} style={{ flex: 3, padding: '10px', background: bot.status === 'running' ? '#fbbf2415' : '#22c55e15', color: bot.status === 'running' ? '#fbbf24' : '#22c55e', border: 'none', borderRadius: '10px', cursor: 'pointer', fontSize: '10px', fontWeight: 800 }}>{isLoading ? '...' : (bot.status === 'running' ? 'LEÁLLÍT' : 'INDÍTÁS')}</button>
         <button onClick={() => onAction('reset')} style={{ flex: 1, padding: '10px', background: '#3b3bff15', color: '#818cf8', border: 'none', borderRadius: '10px', cursor: 'pointer' }}><RotateCcw size={14} /></button>
+        <button onClick={onEdit} style={{ flex: 1, padding: '10px', background: '#6366f115', color: '#818cf8', border: 'none', borderRadius: '10px', cursor: 'pointer' }}><Settings size={14} /></button>
         <button onClick={onDelete} style={{ flex: 1, padding: '10px', background: '#ef444415', color: '#ef4444', border: 'none', borderRadius: '10px', cursor: 'pointer' }}><Trash2 size={14} /></button>
       </div>
     </motion.div>
@@ -415,9 +604,90 @@ function BotCard({ bot, isInPos, onAction, onDelete, isLoading }: any) {
 
 function SummaryCard({ label, value, color }: { label: string, value: string | number, color: string }) {
   return (
-    <div style={{ background: '#13131f', padding: '15px', borderRadius: '12px', border: '1px solid #252535' }}>
-      <p style={{ fontSize: '10px', color: '#4b5563', margin: '0 0 8px', fontWeight: 700, textTransform: 'uppercase' }}>{label}</p>
-      <p style={{ fontSize: '20px', fontWeight: 700, color: color, margin: 0 }}>{value}</p>
+    <div style={{ background: '#13131f', padding: '10px 15px', borderRadius: '12px', border: '1px solid #252535' }}>
+      <p style={{ fontSize: '9px', color: '#4b5563', margin: '0 0 5px', fontWeight: 700, textTransform: 'uppercase' }}>{label}</p>
+      <p style={{ fontSize: '16px', fontWeight: 700, color: color, margin: 0 }}>{value}</p>
     </div>
+  )
+}
+
+function Sparkline({ data }: { data: number[] }) {
+  if (!data || data.length < 2) return <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '8px', color: '#333' }}>Várakozás adatokra...</div>
+  
+  // Számoljuk ki a kumulált profitot a vizualizációhoz
+  let cumulative = 0;
+  const points_data = data.map(v => {
+    cumulative += v;
+    return cumulative;
+  });
+
+  const min = Math.min(...points_data); const max = Math.max(...points_data);
+  const range = max - min || 1; const width = 200; const height = 45;
+  
+  const points = points_data.map((v, i) => {
+    const x = (i / (points_data.length - 1)) * width
+    const y = height - ((v - min) / range) * height
+    return `${x},${y}`
+  }).join(' ')
+
+  const isUp = points_data[points_data.length - 1] >= points_data[0]
+
+  return (
+    <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ filter: 'drop-shadow(0 0 2px rgba(99, 102, 241, 0.2))' }}>
+      <polyline fill="none" stroke={isUp ? "#22c55e" : "#ef4444"} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" points={points} style={{ transition: 'all 0.5s ease' }} />
+      <path d={`M ${points} L ${width},${height} L 0,${height} Z`} fill={isUp ? "url(#gradUp)" : "url(#gradDown)"} opacity="0.15" />
+      <defs>
+        <linearGradient id="gradUp" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style={{ stopColor: '#22c55e' }} /><stop offset="100%" style={{ stopColor: 'transparent' }} /></linearGradient>
+        <linearGradient id="gradDown" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style={{ stopColor: '#ef4444' }} /><stop offset="100%" style={{ stopColor: 'transparent' }} /></linearGradient>
+      </defs>
+    </svg>
+  )
+}
+
+function SettingsModal({ bot, onClose, onSave, isUpdating }: { bot: Bot, onClose: () => void, onSave: (u: any) => void, isUpdating: boolean }) {
+  const [betSize, setBetSize] = useState(bot.bet_size)
+  const [stopLoss, setStopLoss] = useState(bot.stop_loss)
+  const [takeProfit, setTakeProfit] = useState(bot.take_profit)
+  const [name, setName] = useState(bot.name)
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: '20px' }}>
+      <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '24px', width: '100%', maxWidth: '400px', overflow: 'hidden' }}>
+        <div style={{ padding: '20px', borderBottom: '1px solid #252535', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><Settings size={18} color="#6366f1" /><h2 style={{ fontSize: '16px', fontWeight: 700, margin: 0 }}>Bot Beállítások</h2></div>
+          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: '#4b5563', cursor: 'pointer' }}><X size={20} /></button>
+        </div>
+        
+        <div style={{ padding: '25px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <div>
+            <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#4b5563', marginBottom: '8px', textTransform: 'uppercase' }}>Bot Neve</label>
+            <input type="text" value={name} onChange={e => setName(e.target.value)} style={{ width: '100%', background: '#0b0b14', border: '1px solid #252535', borderRadius: '12px', padding: '12px', color: '#fff', fontSize: '14px', outline: 'none' }} />
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
+            <div>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#4b5563', marginBottom: '8px', textTransform: 'uppercase' }}>Alap Tét ($)</label>
+              <input type="number" step="0.1" value={betSize} onChange={e => setBetSize(Number(e.target.value))} style={{ width: '100%', background: '#0b0b14', border: '1px solid #252535', borderRadius: '12px', padding: '12px', color: '#fff', fontSize: '14px', outline: 'none' }} />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#4b5563', marginBottom: '8px', textTransform: 'uppercase' }}>Stop Loss (%)</label>
+              <input type="number" step="0.01" value={stopLoss} onChange={e => setStopLoss(Number(e.target.value))} style={{ width: '100%', background: '#0b0b14', border: '1px solid #252535', borderRadius: '12px', padding: '12px', color: '#fff', fontSize: '14px', outline: 'none' }} />
+            </div>
+          </div>
+
+          <div>
+            <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#4b5563', marginBottom: '8px', textTransform: 'uppercase' }}>Take Profit (%)</label>
+            <input type="number" step="0.01" value={takeProfit} onChange={e => setTakeProfit(Number(e.target.value))} style={{ width: '100%', background: '#0b0b14', border: '1px solid #252535', borderRadius: '12px', padding: '12px', color: '#fff', fontSize: '14px', outline: 'none' }} />
+          </div>
+
+          <div style={{ marginTop: '10px', display: 'flex', gap: '10px' }}>
+            <button onClick={onClose} style={{ flex: 1, padding: '14px', background: 'transparent', border: '1px solid #252535', color: '#fff', borderRadius: '12px', cursor: 'pointer', fontSize: '13px', fontWeight: 600 }}>Mégse</button>
+            <button onClick={() => onSave({ name, bet_size: betSize, stop_loss: stopLoss, take_profit: takeProfit })} disabled={isUpdating} style={{ flex: 2, padding: '14px', background: '#3b3bff', border: 'none', color: '#fff', borderRadius: '12px', cursor: 'pointer', fontSize: '13px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+              {isUpdating ? <Loader2 size={18} className="animate-spin" /> : 'Beállítások mentése'}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </motion.div>
   )
 }

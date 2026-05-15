@@ -58,6 +58,7 @@ pub struct ActiveMarket {
     pub price_to_beat: Option<f64>, // Settlement price
     pub status: String,     // "active", "closed", "settled"
     pub category: String,   // "BTC 5", "ETH 15", etc.
+    pub neg_risk: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -259,6 +260,8 @@ pub async fn fetch_market_by_slug(slug: &str, asset: &str, timeframe: &str) -> O
                 liquidity: Option<f64>,
                 #[serde(rename = "clobTokenIds", default)]
                 clob_token_ids: Option<String>,
+                #[serde(rename = "negRisk", default)]
+                neg_risk: bool,
                 #[serde(default)]
                 tokens: Option<Vec<MarketToken>>,
             }
@@ -343,8 +346,35 @@ pub async fn fetch_market_by_slug(slug: &str, asset: &str, timeframe: &str) -> O
 
             let volume = market.volume_num.unwrap_or(event.volume.unwrap_or(0.0));
             let liquidity = market.liquidity.unwrap_or(event.liquidity_clob.unwrap_or(0.0));
-            let price_to_beat = event.event_metadata.as_ref()
+            
+            let mut price_to_beat = event.event_metadata.as_ref()
                 .and_then(|m| m.price_to_beat);
+
+            if price_to_beat.is_none() {
+                // Regex fallback on question or description (e.g. "BTC >= $78,000.00")
+                let regex = regex::Regex::new(r"\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)").unwrap();
+                let text_to_search = format!("{} {}", market.question, market.description.as_deref().unwrap_or(""));
+                if let Some(captures) = regex.captures(&text_to_search) {
+                    if let Some(matched) = captures.get(1) {
+                        let price_str = matched.as_str().replace(",", "");
+                        if let Ok(parsed) = price_str.parse::<f64>() {
+                            price_to_beat = Some(parsed);
+                            tracing::debug!("Extracted price_to_beat via regex: {}", parsed);
+                        }
+                    }
+                }
+            }
+
+            let mut status = if market.closed == Some(true) || event.closed == Some(true) {
+                "closed".to_string()
+            } else {
+                "active".to_string()
+            };
+
+            // If we have a price to beat and the market is closed, it might be settled
+            if status == "closed" && time_remaining < -60 {
+                status = "settled".to_string();
+            }
 
             Some(ActiveMarket {
                 condition_id: market.condition_id.clone(),
@@ -362,8 +392,9 @@ pub async fn fetch_market_by_slug(slug: &str, asset: &str, timeframe: &str) -> O
                 asset: asset.to_uppercase(),
                 timeframe: timeframe.to_string(),
                 price_to_beat,
-                status: "active".to_string(),
+                status,
                 category: format!("{} {}", asset.to_uppercase(), timeframe),
+                neg_risk: market.neg_risk,
             })
         }
         _ => None,

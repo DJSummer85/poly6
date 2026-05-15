@@ -528,6 +528,10 @@ pub async fn validate_key(
         populate_credential_cache(&state, user_id).await;
     }
 
+    if payload.key_name.starts_with("telegram_") {
+        state.telegram_service.invalidate_cache(user_id).await;
+    }
+
     Json(serde_json::json!({
         "valid": true,
         "message": format!("{} validated and stored", payload.key_name),
@@ -582,36 +586,33 @@ async fn populate_credential_cache(state: &crate::api::AppState, user_id: i64) {
     let api_secret = keys.iter().find(|k| k.key_name == "polymarket_api_secret").map(|k| &k.key_value);
     let passphrase = keys.iter().find(|k| k.key_name == "polymarket_passphrase").map(|k| &k.key_value);
     let private_key = keys.iter().find(|k| k.key_name == "polymarket_private_key").map(|k| &k.key_value);
+    let signature_type_str = keys.iter().find(|k| k.key_name == "polymarket_signature_type").map(|k| &k.key_value);
+    let funder = keys.iter().find(|k| k.key_name == "polymarket_funder").map(|k| k.key_value.clone());
+
+    let signature_type = signature_type_str.and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
 
     if let (Some(key), Some(secret), Some(pass)) = (api_key, api_secret, passphrase) {
         if key.len() > 5 && secret.len() > 5 && pass.len() > 5 {
-            let (pk, wallet) = if let Some(pk_val) = private_key {
+            if let Some(pk_val) = private_key {
                 if pk_val.len() > 5 {
-                    match PolymarketClient::new(pk_val) {
-                        Ok(client) => (pk_val.clone(), client.address()),
-                        Err(e) => {
-                            tracing::warn!("Failed to derive wallet from private_key: {}", e);
-                            (String::new(), String::new())
-                        }
-                    }
-                } else {
-                    (String::new(), String::new())
-                }
-            } else {
-                (String::new(), String::new())
-            };
+                    let wallet_address = match PolymarketClient::new(pk_val) {
+                        Ok(client) => client.address(),
+                        Err(_) => String::new(),
+                    };
 
-            let mut cache = state.credential_cache.write().await;
-            cache.insert(user_id, crate::api::CachedCredentials {
-                api_key: key.clone(),
-                api_secret: secret.clone(),
-                api_passphrase: pass.clone(),
-                private_key: pk,
-                funder: None,
-                signature_type: 0,
-                wallet_address: wallet,
-            });
-            tracing::info!("Credential cache populated for user {}", user_id);
+                    let mut cache = state.credential_cache.write().await;
+                    cache.insert(user_id, crate::api::CachedCredentials {
+                        api_key: key.clone(),
+                        api_secret: secret.clone(),
+                        api_passphrase: pass.clone(),
+                        private_key: pk_val.clone(),
+                        funder,
+                        signature_type,
+                        wallet_address,
+                    });
+                    tracing::info!("Updated credential cache for user {}", user_id);
+                }
+            }
         }
     }
 }
@@ -736,6 +737,10 @@ pub async fn store_api_keys(
             })
             .into_response();
         }
+    }
+
+    if payload.provider == "telegram" {
+        state.telegram_service.invalidate_cache(claims.user_id).await;
     }
 
     Json(serde_json::json!({ "success": true, "message": "Keys stored successfully" })).into_response()

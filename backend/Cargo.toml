@@ -61,6 +61,7 @@ dotenv = "0.15"
 # Ethereum/Polymarket
 ethers = { version = "2.0", default-features = false }
 hex = "0.4"
+regex = "1.12.3"
 
 
 [dev-dependencies]

@@ -104,6 +104,18 @@ interface AppState {
     activity: Omit<AppState["botActivities"][number][0], "id">
   ) => void;
   clearBotActivities: (botId: number) => void;
+  
+  // Thoughts (Hungarian Translated)
+  thoughts: Array<{
+    id: string;
+    botId: string;
+    botName: string;
+    text: string;
+    type: "info" | "success" | "warn" | "error";
+    timestamp: number;
+  }>;
+  addThought: (thought: Omit<AppState["thoughts"][number], "id">) => void;
+  clearThoughts: () => void;
 
   // UI
   sidebarCollapsed: boolean;
@@ -260,6 +272,17 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           botActivities: { ...state.botActivities, [botId]: [] },
         })),
+
+      // Thoughts
+      thoughts: [],
+      addThought: (thought) =>
+        set((state) => ({
+          thoughts: [
+            ...state.thoughts.slice(-99),
+            { ...thought, id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+          ],
+        })),
+      clearThoughts: () => set({ thoughts: [] }),
 
       // UI
       sidebarCollapsed: false,

@@ -8,7 +8,7 @@ use tokio::sync::{RwLock, mpsc, broadcast};
 
 use crate::db::Db;
 use crate::middleware::auth as auth_middleware;
-use crate::services::CredentialService;
+use crate::services::{CredentialService, TelegramService};
 use crate::trading::BinanceClient;
 use crate::trading::market_data::MarketDataService;
 use crate::trading::orchestrator::{BotOrchestrator, BotEvent};
@@ -25,6 +25,7 @@ pub mod positions;
 pub mod settings;
 pub mod sse;
 pub mod strategy_tests;
+pub mod telegram;
 pub mod user;
 
 #[derive(Clone)]
@@ -37,6 +38,7 @@ pub struct AppState {
     pub credential_cache: Arc<RwLock<HashMap<i64, CachedCredentials>>>,
     pub credential_service: Arc<CredentialService>,
     pub market_service: MarketDataService,
+    pub telegram_service: Arc<TelegramService>,
 }
 
 #[derive(Clone)]
@@ -55,15 +57,19 @@ impl AppState {
         let (event_sender, event_receiver) = mpsc::unbounded_channel::<BotEvent>();
         let (broadcaster, _) = broadcast::channel(100);
 
+        let telegram_service = Arc::new(TelegramService::new(db.clone()));
+        let orchestrator = Arc::new(BotOrchestrator::new(db.clone(), event_sender).with_telegram(telegram_service.clone()));
+
         Self {
             db: db.clone(),
             binance_client: Arc::new(RwLock::new(None)),
-            orchestrator: Arc::new(BotOrchestrator::new(db.clone(), event_sender)),
+            orchestrator,
             event_receiver: Arc::new(RwLock::new(event_receiver)),
             bot_event_broadcaster: Arc::new(broadcaster),
             credential_cache: Arc::new(RwLock::new(HashMap::new())),
             credential_service: Arc::new(CredentialService::new()),
             market_service: crate::trading::market_data::MarketDataService::new(),
+            telegram_service,
         }
     }
 
@@ -142,6 +148,7 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/strategy-tests/:id/events", get(strategy_tests::get_strategy_test_events))
         .route("/strategy-tests/:id/performance", get(strategy_tests::get_strategy_test_performance))
         .route("/validate-credentials", post(live_readiness::validate_credentials))
+        .route("/settings/telegram/test", post(telegram::test_telegram))
         .route("/funding/info", get(funding::funding_info))
         .route("/funding/wallet-info", get(funding::wallet_info))
         .route("/funding/wrap", post(funding::wrap_pusd))

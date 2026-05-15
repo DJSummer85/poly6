@@ -13,6 +13,7 @@ import {
   Shield,
   Trash2,
   X,
+  Zap,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
@@ -38,6 +39,8 @@ const API_KEYS_CONFIG: ApiKeyType[] = [
       { key: "api_secret", label: "API Secret", placeholder: "pm_secret_xxxxx", required: true },
       { key: "passphrase", label: "Passphrase", placeholder: "your_passphrase", required: true },
       { key: "private_key", label: "Private Key", placeholder: "0x...", required: true },
+      { key: "signature_type", label: "Signature Type (0=Metamask, 1=Email/Magic)", placeholder: "0", required: false },
+      { key: "funder", label: "Profile Address (Optional)", placeholder: "0x...", required: false },
     ],
     status: "empty",
   },
@@ -48,6 +51,16 @@ const API_KEYS_CONFIG: ApiKeyType[] = [
     fields: [
       { key: "api_key", label: "API Key", placeholder: "bn_api_xxxxx", required: true },
       { key: "api_secret", label: "API Secret", placeholder: "bn_secret_xxxxx", required: true },
+    ],
+    status: "empty",
+  },
+  {
+    id: "telegram",
+    name: "Telegram Értesítések",
+    description: "Valós idejű értesítések küldése a bot tevékenységéről",
+    fields: [
+      { key: "bot_token", label: "Bot Token", placeholder: "123456:ABC-DEF...", required: true },
+      { key: "chat_id", label: "Chat ID", placeholder: "123456789", required: true },
     ],
     status: "empty",
   },
@@ -65,12 +78,14 @@ export default function SettingsPage() {
   const [apiKeys, setApiKeys] = useState<ApiKeyType[]>(API_KEYS_CONFIG);
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [inputValues, setInputValues] = useState<Record<string, Record<string, string>>>({
-    polymarket: { api_key: "", api_secret: "", passphrase: "", private_key: "" },
+    polymarket: { api_key: "", api_secret: "", passphrase: "", private_key: "", signature_type: "0", funder: "" },
     binance: { api_key: "", api_secret: "" },
+    telegram: { bot_token: "", chat_id: "" },
   });
   const [showValues, setShowValues] = useState<Record<string, Record<string, boolean>>>({
     polymarket: { api_key: false, api_secret: false, passphrase: false, private_key: false },
     binance: { api_key: false, api_secret: false },
+    telegram: { bot_token: false, chat_id: false },
   });
   const [loading, setLoading] = useState(false);
 
@@ -435,6 +450,35 @@ export default function SettingsPage() {
                   marginTop: "1.5rem",
                 }}
               >
+                {config.id === "telegram" && config.status === "valid" && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const res = await apiFetch<any>("/settings/telegram/test", { method: "POST" });
+                        if (res.success) toast.success(res.message);
+                        else toast.error(res.error);
+                      } catch (e) { toast.error("Hiba a teszt során"); }
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                      padding: "0.5rem 1rem",
+                      borderRadius: 8,
+                      fontSize: 14,
+                      color: "#a3e635",
+                      background: "rgba(163, 230, 53, 0.1)",
+                      border: "1px solid rgba(163, 230, 53, 0.2)",
+                      cursor: "pointer",
+                      marginRight: "auto"
+                    }}
+                  >
+                    <Zap size={16} />
+                    Teszt üzenet
+                  </button>
+                )}
+
                 {config.status !== "empty" && (
                   <button
                     type="button"

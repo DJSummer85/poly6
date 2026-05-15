@@ -27,10 +27,17 @@ pub struct BotResponse {
     pub use_kelly: bool, pub kelly_fraction: f64, pub max_bet: f64, pub interval: i64,
     pub stop_loss: f64, pub take_profit: f64, pub total_trades: i64, pub winning_trades: i64,
     pub losing_trades: i64, pub win_rate: f64, pub trading_mode: String,
+    pub pnl_history: Vec<f64>,
 }
 
-impl From<BotRecord> for BotResponse {
-    fn from(r: BotRecord) -> Self {
+impl BotResponse {
+    pub async fn from_record_with_history(r: BotRecord, db: &crate::db::Db) -> Self {
+        let history = queries::get_recent_decisions(db, r.id, 20).await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| d.pnl.unwrap_or(0.0))
+            .collect();
+            
         Self {
             id: r.id, name: r.name, market_id: r.market_id, strategy_type: r.strategy_type,
             params: r.params, status: r.status, created_at: r.created_at, bet_size: r.bet_size,
@@ -38,6 +45,7 @@ impl From<BotRecord> for BotResponse {
             interval: r.interval, stop_loss: r.stop_loss, take_profit: r.take_profit,
             total_trades: r.total_trades, winning_trades: r.winning_trades, losing_trades: r.losing_trades,
             win_rate: r.win_rate, trading_mode: r.trading_mode,
+            pnl_history: history,
         }
     }
 }
@@ -148,14 +156,20 @@ pub async fn create_bot(State(state): State<AppState>, Extension(claims): Extens
 
 pub async fn list_bots(State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
     match queries::get_bots_by_user(&state.db(), claims.user_id).await {
-        Ok(bots) => Json(bots.into_iter().map(BotResponse::from).collect::<Vec<_>>()).into_response(),
+        Ok(bots) => {
+            let mut resps = Vec::new();
+            for bot in bots {
+                resps.push(BotResponse::from_record_with_history(bot, &state.db()).await);
+            }
+            Json(resps).into_response()
+        },
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
 }
 
 pub async fn get_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
     match queries::get_bot_by_id(&state.db(), id, claims.user_id).await {
-        Ok(Some(bot)) => Json(BotResponse::from(bot)).into_response(),
+        Ok(Some(bot)) => Json(BotResponse::from_record_with_history(bot, &state.db()).await).into_response(),
         _ => (StatusCode::NOT_FOUND).into_response()
     }
 }
@@ -218,6 +232,7 @@ pub async fn get_portfolio(Path((id,)): Path<(i64,)>, State(state): State<AppSta
 pub async fn reset_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>) -> Response {
     let _ = state.orchestrator.stop_bot(id, claims.user_id).await;
     let _ = queries::reset_portfolio(&state.db(), id, 100.0).await;
+    let _ = queries::clear_trade_history(&state.db(), id, claims.user_id).await;
     Json(serde_json::json!({"success": true})).into_response()
 }
 
@@ -256,6 +271,7 @@ pub async fn reset_all_bots(State(state): State<AppState>, Extension(claims): Ex
         for bot in bots {
             let _ = state.orchestrator.stop_bot(bot.id, claims.user_id).await;
             let _ = queries::reset_portfolio(&state.db(), bot.id, 100.0).await;
+            let _ = queries::clear_trade_history(&state.db(), bot.id, claims.user_id).await;
         }
     }
     Json(serde_json::json!({"success": true})).into_response()
@@ -314,7 +330,18 @@ pub async fn set_all_bots_mode(State(state): State<AppState>, Extension(claims):
 }
 
 pub async fn update_bot(Path((id,)): Path<(i64,)>, State(state): State<AppState>, Extension(claims): Extension<Claims>, Json(p): Json<UpdateBotRequest>) -> Response {
-    let _ = queries::update_bot(&state.db(), id, claims.user_id, p.name.as_deref(), p.market_id.as_deref(), p.strategy_type.as_deref(), p.params.as_deref()).await;
+    // 1. Update basic fields (name, market, strategy, params)
+    let _ = queries::update_bot(
+        &state.db(), id, claims.user_id, 
+        p.name.as_deref(), p.market_id.as_deref(), p.strategy_type.as_deref(), p.params.as_deref()
+    ).await;
+    
+    // 2. Update trading configuration fields
+    let _ = queries::update_bot_config(
+        &state.db(), id, claims.user_id,
+        p.bet_size, p.use_kelly, p.kelly_fraction, p.max_bet, p.interval, p.stop_loss, p.take_profit
+    ).await;
+
     Json(serde_json::json!({"success": true})).into_response()
 }
 

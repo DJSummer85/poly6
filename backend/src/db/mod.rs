@@ -1334,6 +1334,20 @@ pub mod queries {
         Ok(result)
     }
 
+    /// Clear trade history for a bot
+    pub async fn clear_trade_history(
+        db: &Db,
+        bot_id: i64,
+        user_id: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM trade_decisions WHERE bot_id = ? AND user_id = ?")
+            .bind(bot_id)
+            .bind(user_id)
+            .execute(db.as_ref())
+            .await?;
+        Ok(())
+    }
+
   pub async fn init_portfolio(db: &Db, bot_id: i64, user_id: i64, initial_balance: f64) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT OR IGNORE INTO bot_portfolios 

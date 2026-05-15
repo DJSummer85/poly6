@@ -483,8 +483,22 @@ impl PolymarketClient {
 
         let salt: U256 = U256::from(rand::random::<u64>());
         let timestamp_ms = U256::from(chrono::Utc::now().timestamp_millis() as u64);
-        let maker_amount = U256::from((order.size * 1000000.0) as u64);
-        let taker_amount = U256::from((order.size * order.price * 1000000.0) as u64);
+        
+        // In Polymarket V2:
+        // BUY: makerAmount = total USDC, takerAmount = total tokens
+        // SELL: makerAmount = total tokens, takerAmount = total USDC
+        let (maker_amount, taker_amount) = if order.side == "BUY" {
+            (
+                U256::from((order.size * order.price * 1000000.0) as u64), // USDC (6 decimals)
+                U256::from((order.size * 1000000.0) as u64)               // Tokens (6 decimals)
+            )
+        } else {
+            (
+                U256::from((order.size * 1000000.0) as u64),               // Tokens (6 decimals)
+                U256::from((order.size * order.price * 1000000.0) as u64) // USDC (6 decimals)
+            )
+        };
+
         let token_id = U256::from_str_radix(&order.token_id, 10)
             .unwrap_or(U256::zero());
         let side = Token::Uint(U256::from(if order.side == "BUY" { 0u8 } else { 1u8 }));

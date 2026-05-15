@@ -135,6 +135,7 @@ impl BotExecutor {
                     &bot.market_id,
                     "YES",
                     confidence,
+                    bot.bet_size,
                     private_key,
                 ).await?;
             }
@@ -153,6 +154,7 @@ impl BotExecutor {
                     &bot.market_id,
                     "NO",
                     confidence,
+                    bot.bet_size,
                     private_key,
                 ).await?;
             }
@@ -168,14 +170,31 @@ impl BotExecutor {
         user_id: i64,
         market_id: &str,
         side: &str,
-        _confidence: f64,
+        confidence: f64,
+        bot_bet_size: f64,
         private_key: &str,
     ) -> Result<(), String> {
         let pm_client = PolymarketClient::new(private_key)
             .map_err(|e| format!("Failed to create client: {}", e))?;
 
         let token_id = market_id;
-        let size = 1.0;
+        
+        // Use Kelly Criterion as max bound if confidence implies an edge
+        let price_est = if side == "YES" { 0.5 } else { 0.5 }; // Simple default
+        let edge = confidence - price_est;
+        let kelly_pct = if edge > 0.0 && price_est > 0.0 {
+            let odds = (1.0 - price_est) / price_est;
+            (odds * confidence - (1.0 - confidence)) / odds
+        } else {
+            0.0
+        };
+        
+        // Use bot's configured bet size as base, optionally scale by Kelly
+        let size = if kelly_pct > 0.0 {
+            bot_bet_size.max(1.0) // simplified to use bot config
+        } else {
+            bot_bet_size
+        };
 
         let quote_side = if side == "YES" { "BUY" } else { "SELL" };
         let price = pm_client.get_quote(token_id, quote_side, size)

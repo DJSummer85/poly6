@@ -2483,6 +2483,7 @@ dependencies = [
  "jsonwebtoken 9.3.1",
  "pbkdf2 0.12.2",
  "rand 0.8.6",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

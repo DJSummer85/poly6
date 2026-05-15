@@ -185,6 +185,42 @@ export function useSSE() {
           case "trade_decision": {
             const outcomeText = data.outcome === "YES" ? "UP" : "DOWN";
             const confidencePct = (data.confidence * 100).toFixed(0);
+            
+            // Hungarian translation for thoughts console
+            const translateSignal = (reason: string) => {
+              const r = reason.toLowerCase();
+              if (r.includes("too close to market close")) return "Túl közel van a piac zárása (biztonsági szabály)";
+              if (r.includes("no pm price")) return "Nincs Polymarket árfolyam adat";
+              if (r.includes("price outside range")) return "Az árfolyam a megengedett tartományon kívül van";
+              if (r.includes("binance velocity up")) return "Binance sebesség: Erős EMELKEDÉS detektálva";
+              if (r.includes("binance velocity down")) return "Binance sebesség: Erős ESÉS detektálva";
+              if (r.includes("delta too small")) return "Túl kicsi az elmozdulás a profitabiláshoz";
+              if (r.includes("too late to trade")) return "Már túl késő belépni ebbe a körbe";
+              if (r.includes("window just started")) return "Az ablak még csak most indult, várakozás...";
+              if (r.includes("no momentum")) return "Nincs elég lendület a piacon";
+              if (r.includes("no strong trend")) return "Nincs egyértelmű, erős trend";
+              if (r.includes("low volatility")) return "Túl alacsony a volatilitás";
+              if (r.includes("waiting for sniper setup")) return "Várakozás a tökéletes sniper belépőre";
+              if (r.includes("no contrarian signal")) return "Nincs kontra-trend jelzés";
+              if (r.includes("near fair value")) return "Az árfolyam a reális érték közelében van, nem éri meg kockáztatni";
+              if (r.includes("signal too weak")) return "A jelzés túl gyenge a belépéshez";
+              if (r.includes("price too high")) return "Túl magas az árfolyam a stratégiához";
+              if (r.includes("price too low")) return "Túl alacsony az árfolyam a stratégiához";
+              if (r.includes("negative risk")) return "Negatív kockázatú piac detektálva";
+              if (r.includes("insufficient btc delta")) return "Elégtelen BTC elmozdulás";
+              if (r.includes("confidence too low")) return "Túl alacsony bizalmi szint a döntéshez";
+              
+              // Fallback for simple "Hold" with reason
+              if (r.startsWith('hold("') || r.startsWith('hold')) {
+                const msg = reason.match(/\"(.*)\"/)?.[1] || reason;
+                return `Várakozás: ${msg}`;
+              }
+              
+              return reason;
+            };
+
+            const translatedReason = translateSignal(data.reason);
+
             addLog({
               bot_id: data.bot_id,
               bot_name: `Bot ${data.bot_id}`,
@@ -192,6 +228,16 @@ export function useSSE() {
               timestamp: Date.now(),
               level: data.confidence > 0.7 ? "success" : "info",
             });
+
+            // Add to Hungarian thoughts console
+            useAppStore.getState().addThought({
+              botId: data.bot_id.toString(),
+              botName: data.bot_name || `Bot ${data.bot_id}`,
+              text: translatedReason,
+              type: data.outcome === "HOLD" ? "info" : (data.confidence > 0.6 ? "success" : "warn"),
+              timestamp: Date.now(),
+            });
+
             addBotActivity(data.bot_id, {
               botId: data.bot_id,
               type: "trade_decision",

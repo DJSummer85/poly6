@@ -93,7 +93,26 @@ export function Sidebar({ collapsed }: SidebarProps) {
       {/* Emergency Stop */}
       {!collapsed && (
         <div className="border-t border-white/8 p-3 pb-4">
-          <button type="button" className="btn-emergency w-full">
+          <button 
+            type="button" 
+            className="btn-emergency w-full"
+            onClick={async () => {
+              if (!confirm("BIZTOSAN LEÁLLÍTASZ MINDENT?")) return;
+              try {
+                const isDev = window.location.port === "3000";
+                const baseUrl = isDev ? "http://localhost:3001" : window.location.origin;
+                const token = localStorage.getItem('token');
+                
+                await fetch(`${baseUrl}/api/bots/stop-all`, { 
+                  method: 'POST', 
+                  headers: { 'Authorization': `Bearer ${token}` } 
+                });
+                window.location.reload(); // Refresh to show stopped state
+              } catch (e) {
+                console.error("Panic failed", e);
+              }
+            }}
+          >
             Emergency Stop
           </button>
         </div>

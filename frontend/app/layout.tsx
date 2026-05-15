@@ -27,7 +27,6 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       </head>
       <body className="bg-background font-sans text-text antialiased">
         <Providers>
-          <TradingModeToggle />
           {children}
         </Providers>
       </body>

@@ -19,6 +19,7 @@ pub struct MarketSnapshot {
     pub btc_acceleration: Option<f64>,
     pub btc_volatility: Option<f64>,
     pub btc_window_open: Option<f64>,
+    pub market_start_price: Option<f64>,
     pub order_book_bids: Vec<f64>,
     pub order_book_asks: Vec<f64>,
     pub fetched_at: i64, // unix timestamp ms
@@ -41,6 +42,7 @@ impl MarketSnapshot {
             btc_acceleration: None,
             btc_volatility: None,
             btc_window_open: None,
+            market_start_price: None,
             order_book_bids: Vec::new(),
             order_book_asks: Vec::new(),
             fetched_at: 0,
@@ -59,6 +61,7 @@ impl MarketSnapshot {
             btc_velocity: self.btc_velocity,
             btc_acceleration: self.btc_acceleration,
             btc_volatility: self.btc_volatility,
+            market_start_price: self.market_start_price,
         }
     }
 }
@@ -82,6 +85,7 @@ pub struct StrategyContext {
     pub btc_velocity: Option<f64>, // % change per second
     pub btc_acceleration: Option<f64>,
     pub btc_volatility: Option<f64>,
+    pub market_start_price: Option<f64>,
 }
 
 /// Strategy executor - evaluates BTC price and generates trading signals
@@ -137,6 +141,7 @@ impl StrategyExecutor {
             btc_velocity: None,
             btc_acceleration: None,
             btc_volatility: None,
+            market_start_price: None,
         };
         self.evaluate_with_context(ctx)
     }
@@ -288,6 +293,13 @@ impl StrategyExecutor {
             None => return Signal::Hold("No BTC data".to_string()),
         };
 
+        // Kiszámoljuk, hogy az indulás óta (window_open) merre tart az ár
+        let window_delta = if let (Some(open), true) = (ctx.btc_window_open, ctx.btc_price > 0.0) {
+            (ctx.btc_price - open) / open
+        } else {
+            0.0
+        };
+
         // Overextended filter: if move is > 0.30%, it's likely to revert
         let overextended_threshold = 0.0030;
         let threshold = self.params.min_delta * 1.2;
@@ -297,17 +309,21 @@ impl StrategyExecutor {
             return Signal::Hold(format!("Overextended: {:.3}%", change * 100.0));
         }
 
-        if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            // Raw confidence from move magnitude, slightly more aggressive baseline
-            let raw_confidence = (0.56_f64 + change.abs() * 45.0).min(0.82_f64);
+        // Csak akkor kötünk momentumra, ha a rövid távú lendület MEGEGYEZIK a piac indulása óta tartó fő iránnyal.
+        // Különben simán bekötnénk egy mikro-korrekcióba, ami garantált veszteség.
+        let is_primary_trend_up = window_delta > -0.0005; // Megengedünk egy pici zajt
+        let is_primary_trend_down = window_delta < 0.0005;
+
+        if change > threshold && is_primary_trend_up && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
+            let raw_confidence = (0.56_f64 + change.abs() * 45.0 + window_delta.max(0.0) * 10.0).min(0.82_f64);
             let confidence = raw_confidence * (1.0 - polymarket_fee_rate);
             Signal::Yes(confidence)
-        } else if change < -threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let raw_confidence = (0.54_f64 + change.abs() * 40.0).min(0.78_f64);
+        } else if change < -threshold && is_primary_trend_down && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
+            let raw_confidence = (0.54_f64 + change.abs() * 40.0 + (-window_delta).max(0.0) * 10.0).min(0.78_f64);
             let confidence = raw_confidence * (1.0 - polymarket_fee_rate);
             Signal::No(confidence)
         } else {
-            Signal::Hold(format!("No momentum: {:.4}%", change * 100.0))
+            Signal::Hold(format!("No safe momentum: {:.4}% (window: {:.4}%)", change * 100.0, window_delta * 100.0))
         }
     }
 
@@ -321,16 +337,24 @@ impl StrategyExecutor {
             None => return Signal::Hold("No BTC data".to_string()),
         };
 
-        let threshold = self.params.min_delta * 1.5;
+        let window_delta = if let (Some(open), true) = (ctx.btc_window_open, ctx.btc_price > 0.0) {
+            (ctx.btc_price - open) / open
+        } else {
+            0.0
+        };
 
-        if change > threshold && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
+        let threshold = self.params.min_delta * 1.5;
+        let is_primary_trend_up = window_delta > -0.0005;
+        let is_primary_trend_down = window_delta < 0.0005;
+
+        if change > threshold && is_primary_trend_up && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
             let confidence = (0.55_f64 + change * 60.0).min(0.80_f64);
             Signal::Yes(confidence)
-        } else if change < -threshold && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
+        } else if change < -threshold && is_primary_trend_down && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
             let confidence = (0.55_f64 + change.abs() * 60.0).min(0.80_f64);
             Signal::No(confidence)
         } else {
-            Signal::Hold(format!("No strong trend: {:.4}%", change * 100.0))
+            Signal::Hold(format!("No safe trend: {:.4}%", change * 100.0))
         }
     }
 

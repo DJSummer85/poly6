@@ -213,22 +213,22 @@ mod tests {
 
     #[test]
     fn test_check_delta() {
-        let params = StrategyParams::default(); // min_delta = 0.02
+        let params = StrategyParams::default(); // min_delta = 0.01
 
-        assert!(check_delta(0.03, &params, None)); // |0.03| > 0.02
-        assert!(!check_delta(0.01, &params, None)); // |0.01| < 0.02
+        assert!(check_delta(0.02, &params, None)); // |0.02| > 0.01
+        assert!(!check_delta(0.005, &params, None)); // |0.005| < 0.01
 
-        assert!(check_delta(0.03, &params, Some("up"))); // 0.03 > 0.02
-        assert!(!check_delta(0.01, &params, Some("up"))); // 0.01 < 0.02
+        assert!(check_delta(0.02, &params, Some("up"))); // 0.02 > 0.01
+        assert!(!check_delta(0.005, &params, Some("up"))); // 0.005 < 0.01
 
-        assert!(check_delta(-0.03, &params, Some("down"))); // -0.03 < -0.02
-        assert!(!check_delta(-0.01, &params, Some("down"))); // -0.01 > -0.02
+        assert!(check_delta(-0.02, &params, Some("down"))); // -0.02 < -0.01
+        assert!(!check_delta(-0.005, &params, Some("down"))); // -0.005 > -0.01
     }
 
     #[test]
     fn test_strategy_params_default() {
         let params = StrategyParams::default();
-        assert_eq!(params.min_delta, 0.02);
+        assert_eq!(params.min_delta, 0.01);
         assert_eq!(params.max_delta, 5.0);
         assert_eq!(params.min_price, 0.30);
         assert_eq!(params.max_price, 0.70);

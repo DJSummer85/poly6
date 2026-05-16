@@ -191,7 +191,7 @@ impl BotExecutor {
         
         // Use bot's configured bet size as base, optionally scale by Kelly
         let size = if kelly_pct > 0.0 {
-            bot_bet_size.max(1.0) // simplified to use bot config
+            (bot_bet_size * (1.0 + kelly_pct)).max(1.0) // Scale bet size up by Kelly percentage
         } else {
             bot_bet_size
         };

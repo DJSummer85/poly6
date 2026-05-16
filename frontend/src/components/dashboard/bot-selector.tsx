@@ -1,7 +1,7 @@
 "use client";
 
 import { AlertTriangle, ArrowDownAZ, ArrowDownNarrowWide, ArrowUpNarrowWide, ChevronDown, Crosshair, Loader2, X } from "lucide-react";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { toast } from "sonner";
 import { useBots, useStartBot, useStopBot } from "@/hooks";
 import { apiFetch } from "@/lib/utils";
@@ -69,7 +69,7 @@ export function BotSelector() {
   const { selectedBotIds, setSelectedBotIds, tradingMode } = useAppStore();
 
   // Sync API bots to store if store is empty or when API data changes
-  useMemo(() => {
+  useEffect(() => {
     if (botsFromApi && botsFromApi.length > 0) {
       setBots(botsFromApi);
     }

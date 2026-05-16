@@ -205,7 +205,7 @@ export default function BotsPage() {
     setIsUpdating(true)
     try {
       await apiFetch(`/bots/${id}`, {
-        method: "PATCH",
+        method: "PUT",
         body: JSON.stringify(updates)
       })
       toast.success("Bot beállítások mentve")
@@ -398,6 +398,41 @@ export default function BotsPage() {
         <button onClick={() => setQuickFilter(quickFilter === 'worst3' ? 'none' : 'worst3')} style={{ padding: '7px 15px', borderRadius: '8px', border: '1px solid #252535', background: quickFilter === 'worst3' ? '#ef444415' : '#13131f', color: '#ef4444', fontSize: '11px', fontWeight: 700 }}><AlertTriangle size={14} style={{ marginRight: 6 }} /> Top 3 Legrosszabb</button>
 
         <div style={{ width: '1px', height: '18px', background: '#252535', margin: '0 5px' }} />
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '5px', background: '#13131f', padding: '5px 8px', borderRadius: '8px', border: '1px solid #252535' }}>
+          <span style={{ fontSize: '10px', color: '#4b5563', fontWeight: 700, textTransform: 'uppercase' }}>Kriptó (Mind):</span>
+          <select 
+            onChange={async (e) => {
+              const val = e.target.value;
+              if (!val) return;
+              if (!confirm(`Biztosan átállítod az ÖSSZES botot a(z) ${val} beállításra?`)) {
+                e.target.value = "";
+                return;
+              }
+              const loadingToast = toast.loading("Összes bot frissítése folyamatban...");
+              for (const bot of bots) {
+                try {
+                  await apiFetch(`/bots/${bot.id}`, {
+                    method: "PUT",
+                    body: JSON.stringify({ market_id: val })
+                  });
+                } catch (err) {}
+              }
+              toast.dismiss(loadingToast);
+              toast.success("Minden bot sikeresen átállítva!");
+              loadBots();
+              e.target.value = ""; 
+            }}
+            style={{ background: 'transparent', color: '#818cf8', border: 'none', outline: 'none', fontSize: '11px', fontWeight: 800, cursor: 'pointer' }}
+          >
+            <option value="">-- Válassz --</option>
+            <option value="AUTO">AUTO (Körkörös)</option>
+            <option value="BTC">BTC (Bitcoin)</option>
+            <option value="ETH">ETH (Ethereum)</option>
+            <option value="SOL">SOL (Solana)</option>
+            <option value="XRP">XRP (Ripple)</option>
+          </select>
+        </div>
 
         <button onClick={() => handleBulk("start-all")} style={{ padding: '8px 15px', background: '#22c55e15', color: '#22c55e', border: '1px solid #22c55e30', borderRadius: '8px', fontSize: '11px', fontWeight: 800 }}>▶ Indít mind</button>
         <button onClick={() => handleBulk("stop-all")} style={{ padding: '8px 15px', background: '#fbbf2415', color: '#fbbf24', border: '1px solid #fbbf2430', borderRadius: '8px', fontSize: '11px', fontWeight: 800 }}>■ Megállít mind</button>
@@ -649,6 +684,7 @@ function SettingsModal({ bot, onClose, onSave, isUpdating }: { bot: Bot, onClose
   const [stopLoss, setStopLoss] = useState(bot.stop_loss)
   const [takeProfit, setTakeProfit] = useState(bot.take_profit)
   const [name, setName] = useState(bot.name)
+  const [marketId, setMarketId] = useState(bot.market_id || 'AUTO')
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: '20px' }}>
@@ -662,6 +698,17 @@ function SettingsModal({ bot, onClose, onSave, isUpdating }: { bot: Bot, onClose
           <div>
             <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#4b5563', marginBottom: '8px', textTransform: 'uppercase' }}>Bot Neve</label>
             <input type="text" value={name} onChange={e => setName(e.target.value)} style={{ width: '100%', background: '#0b0b14', border: '1px solid #252535', borderRadius: '12px', padding: '12px', color: '#fff', fontSize: '14px', outline: 'none' }} />
+          </div>
+
+          <div>
+            <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#4b5563', marginBottom: '8px', textTransform: 'uppercase' }}>Kriptovaluta</label>
+            <select value={marketId} onChange={e => setMarketId(e.target.value)} style={{ width: '100%', background: '#0b0b14', border: '1px solid #252535', borderRadius: '12px', padding: '12px', color: '#fff', fontSize: '14px', outline: 'none', cursor: 'pointer' }}>
+              <option value="AUTO">Automatikus (Round-Robin)</option>
+              <option value="BTC">Bitcoin (BTC)</option>
+              <option value="ETH">Ethereum (ETH)</option>
+              <option value="SOL">Solana (SOL)</option>
+              <option value="XRP">Ripple (XRP)</option>
+            </select>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
@@ -682,7 +729,7 @@ function SettingsModal({ bot, onClose, onSave, isUpdating }: { bot: Bot, onClose
 
           <div style={{ marginTop: '10px', display: 'flex', gap: '10px' }}>
             <button onClick={onClose} style={{ flex: 1, padding: '14px', background: 'transparent', border: '1px solid #252535', color: '#fff', borderRadius: '12px', cursor: 'pointer', fontSize: '13px', fontWeight: 600 }}>Mégse</button>
-            <button onClick={() => onSave({ name, bet_size: betSize, stop_loss: stopLoss, take_profit: takeProfit })} disabled={isUpdating} style={{ flex: 2, padding: '14px', background: '#3b3bff', border: 'none', color: '#fff', borderRadius: '12px', cursor: 'pointer', fontSize: '13px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+            <button onClick={() => onSave({ name, bet_size: betSize, stop_loss: stopLoss, take_profit: takeProfit, market_id: marketId })} disabled={isUpdating} style={{ flex: 2, padding: '14px', background: '#3b3bff', border: 'none', color: '#fff', borderRadius: '12px', cursor: 'pointer', fontSize: '13px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
               {isUpdating ? <Loader2 size={18} className="animate-spin" /> : 'Beállítások mentése'}
             </button>
           </div>

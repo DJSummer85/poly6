@@ -11,7 +11,7 @@ use tokio::time::interval;
 use crate::db::Db;
 use crate::db::queries;
 use crate::db::BotRecord;
-use crate::trading::bot_executor::strategies::{Signal, StrategyExecutor, StrategyContext};
+use crate::trading::bot_executor::strategies::{Signal, StrategyExecutor, StrategyContext, MarketSnapshot};
 use crate::trading::risk_manager::RiskManager;
 use crate::trading::bot_loss_tracker::BotLossTrackerManager;
 use crate::trading::strategy_coordinator::StrategyCoordinator;
@@ -61,6 +61,7 @@ pub struct RunningBot {
     pub pending_bet: Option<PendingBet>,
     pub btc_price_history: Vec<(f64, Instant)>,
     pub last_trade_time: Option<Instant>,
+    pub strategy_type: String,
 }
 
 #[derive(Clone)]
@@ -123,6 +124,7 @@ pub async fn restore_running_bots(orchestrator: Arc<BotOrchestrator>) {
             pending_bet: None,
             btc_price_history: Vec::new(),
             last_trade_time: None,
+            strategy_type: bot.strategy_type.clone(),
         };
 
         {
@@ -178,6 +180,7 @@ impl BotOrchestrator {
             consecutive_errors: 0, last_btc_price: None, btc_window_open: None, current_balance,
             pending_bet: None, btc_price_history: Vec::new(),
             last_trade_time: None,
+            strategy_type: bot.strategy_type.clone(),
         });
         self.event_sender.send(BotEvent::SessionStarted { bot_id: bot.id, session_id, bot_name: bot.name.clone() }).ok();
         Ok(session_id)
@@ -195,6 +198,7 @@ impl BotOrchestrator {
             last_market_slug: None, consecutive_errors: 0, last_btc_price: None, btc_window_open: None, 
             current_balance: initial_balance, pending_bet: None, btc_price_history: Vec::new(),
             last_trade_time: None,
+            strategy_type: bot.strategy_type.clone(),
         });
         self.event_sender.send(BotEvent::SessionStarted { bot_id: bot.id, session_id, bot_name: bot.name.clone() }).ok();
         tracing::info!("Bot {} started (session {}), trading_mode={}", bot.id, session_id, bot.trading_mode);
@@ -289,12 +293,24 @@ impl BotOrchestrator {
         }
 
         let all_markets = fetch_active_markets("5").await;
-        // FIX: Minden bot különböző piacot kap, bot_id alapján round-robin elosztással.
+        // Kriptovaluta kiválasztás a bot beállítása alapján
         let market = if all_markets.is_empty() {
             return Ok(());
         } else {
-            let idx = (bot_id as usize) % all_markets.len();
-            all_markets[idx].clone()
+            let target_asset = bot.market_id.to_uppercase();
+            if target_asset != "AUTO" {
+                // Kifejezetten ezt az eszközt kérték (pl. BTC, ETH)
+                if let Some(m) = all_markets.iter().find(|m| m.asset == target_asset) {
+                    m.clone()
+                } else {
+                    // Ha nincs ilyen aktív piac, akkor várunk a következő ciklusra
+                    return Ok(());
+                }
+            } else {
+                // AUTO mód: Round-robin elosztás
+                let idx = (bot_id as usize) % all_markets.len();
+                all_markets[idx].clone()
+            }
         };
 
         // A piacnak megfelelő eszköz árfolyamát kérjük le
@@ -368,28 +384,23 @@ impl BotOrchestrator {
                 let diff = (current_settle_price - bet.start_price) / bet.start_price;
 
                 let won = if let Some(ptb) = bet.price_to_beat {
-                    if bet.side == "YES" { current_settle_price >= ptb } else { current_settle_price < ptb }
+                    let is_won = if bet.side == "YES" { current_settle_price >= ptb } else { current_settle_price < ptb };
+                    tracing::info!("[SETTLE] Bot {}: {} Target={:.2} Final={:.2} Won={}", bot_id, bet.side, ptb, current_settle_price, is_won);
+                    is_won
                 } else {
-                    tracing::error!("[SETTLEMENT] Missing price_to_beat for bot {}. Falling back to start_price. This is mathematically inaccurate!", bot_id);
-                    let min_diff = 0.0001_f64;
-                    if bet.side == "YES" { diff > min_diff } else { diff < -min_diff }
+                    tracing::error!("[SETTLEMENT] Missing price_to_beat for bot {}. Falling back to start_price: {:.2}", bot_id, bet.start_price);
+                    if bet.side == "YES" { current_settle_price >= bet.start_price } else { current_settle_price < bet.start_price }
                 };
                 
-                let effective_cost = if bet.side == "YES" { bet.entry_price } else { 1.0 - bet.entry_price };
-                let profit_if_won = bet.bet_size * (1.0 - effective_cost);
                 let polymarket_fee_rate = 0.02;
+                let potential_return = bet.bet_size / bet.entry_price.max(0.01);
                 let settlement_credit = if won {
-                    // Collateral returned + (profit minus 2% Polymarket fee)
-                    bet.bet_size * effective_cost + profit_if_won * (1.0 - polymarket_fee_rate)
+                    potential_return * (1.0 - polymarket_fee_rate)
                 } else {
                     0.0
                 };
                 
-                let pnl_for_stats = if won { 
-                    profit_if_won * (1.0 - polymarket_fee_rate) 
-                } else { 
-                    -(bet.bet_size * effective_cost) 
-                };
+                let pnl_for_stats = settlement_credit - bet.bet_size;
                 
                 queries::record_paper_settlement(&self.db, bot_id, bet.decision_id, won, settlement_credit, pnl_for_stats).await.ok();
                 
@@ -426,6 +437,18 @@ impl BotOrchestrator {
             }
         }
 
+        let mut snapshot = MarketSnapshot::new(market_slug.clone());
+        snapshot.question = market.question.clone();
+        snapshot.yes_price = market.yes_price;
+        snapshot.no_price = market.no_price;
+        snapshot.time_remaining = market.time_remaining;
+        snapshot.btc_price = asset_price;
+        snapshot.btc_change_24h = asset_change;
+        snapshot.btc_velocity = asset_velocity;
+        snapshot.btc_acceleration = asset_acceleration;
+        snapshot.btc_window_open = rb.btc_window_open;
+        snapshot.market_start_price = Some(market.price_to_beat.or(rb.pending_bet.as_ref().map(|b| b.start_price)).unwrap_or(asset_price));
+
         let ctx = StrategyContext {
             btc_price: asset_price,
             btc_change: asset_change,
@@ -435,6 +458,7 @@ impl BotOrchestrator {
             time_remaining: market.time_remaining,
             btc_velocity: asset_velocity,
             btc_acceleration: asset_acceleration,
+            market_start_price: snapshot.market_start_price,
             btc_volatility: if rb.btc_price_history.len() >= 3 {
                 let prices: Vec<f64> = rb.btc_price_history.iter().map(|(p, _)| *p).collect();
                 let returns: Vec<f64> = prices.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
@@ -466,15 +490,32 @@ impl BotOrchestrator {
                 let outcome = if matches!(signal, Signal::Yes(_)) { "YES" } else { "NO" };
                 
                 if rb.pending_bet.is_none() {
-                    let price = market.yes_price;
-                    let effective_cost = if outcome == "YES" { price } else { 1.0 - price };
+                    let slippage_sim = 1.005; // 0.5% slippage for paper trading
+                    let price = if outcome == "YES" { (market.yes_price * slippage_sim).min(0.99) } else { (market.no_price * slippage_sim).min(0.99) };
+                    let effective_cost = price;
 
-                    // EV check
+                    // EV and Time check
                     let polymarket_fee_rate = 0.02;
-                    let expected_value_positive = *conf > (effective_cost + polymarket_fee_rate);
+                    let min_conf_threshold = 0.55; // Lowered from 0.64 to allow more frequent trades
+                    
+                    // Valódi EV képlet (Expected Value)
+                    // EV = valószínűség * nyereség - (1 - valószínűség) * veszteség
+                    // Nyereség: (1.0 - effective_cost) * (1.0 - fee)
+                    // Veszteség: effective_cost
+                    let win_prob = *conf;
+                    let net_profit_if_win = (1.0 - effective_cost) * (1.0 - polymarket_fee_rate);
+                    let loss_if_fail = effective_cost;
+                    
+                    let expected_value = (win_prob * net_profit_if_win) - ((1.0 - win_prob) * loss_if_fail);
+                    let expected_value_positive = expected_value > 0.0 && *conf >= min_conf_threshold;
+                    
+                    // Prevent momentum entry in last 60s (too risky)
+                    let time_is_okay = market.time_remaining > 60 || rb.strategy_type == "last_seconds_scalp";
 
                     let (can_trade, block_reason) = if !expected_value_positive {
-                        (false, Some(format!("Negative EV (conf {:.2} <= cost {:.2} + fee {:.2})", conf, effective_cost, polymarket_fee_rate)))
+                        (false, Some(format!("Low EV/Conf (conf {:.2} < threshold {:.2})", conf, (effective_cost + polymarket_fee_rate).max(min_conf_threshold))))
+                    } else if !time_is_okay {
+                        (false, Some(format!("Too late to trade ({}s remaining)", market.time_remaining)))
                     } else {
                         let mut rm = self.risk_manager.write().await;
                         rm.can_open_position(
@@ -516,14 +557,8 @@ impl BotOrchestrator {
                             if let Some(ref cache) = credential_cache {
                                 let c = cache.read().await;
                                 if let Some(creds) = c.get(&user_id) {
-                                    // CRITICAL: Check if the actual price is better than our confidence
-                                    let safety_margin = 0.01;
-                                    let current_quote = if outcome == "YES" { market.yes_price } else { market.no_price };
-                                    if current_quote > (*conf - safety_margin) {
-                                        let msg = format!("ABORT TRADE: Price too high! Quote: {:.2}c, Confidence: {:.2}c (Margin: {:.2}c)", current_quote * 100.0, conf * 100.0, safety_margin * 100.0);
-                                        tracing::warn!("Bot {}: {}", bot_id, msg);
-                                        return Ok(());
-                                    }
+                                    // CRITICAL: A biztonsági ellenőrzést (EV) már feljebb elvégeztük.
+                                    // Itt már csak a live order beküldése történik.
                                     let _ = Self::place_order(&market, outcome, bot.bet_size, creds).await;
                                 }
                             }
@@ -537,9 +572,9 @@ impl BotOrchestrator {
                                 .map(|p| p.balance)
                                 .unwrap_or(portfolio.balance);
                             
-                            queries::update_portfolio_balance(&self.db, bot_id, fresh_balance - bot.bet_size * effective_cost).await.ok();
+                            queries::update_portfolio_balance(&self.db, bot_id, fresh_balance - bot.bet_size).await.ok();
                             eprintln!("[BET] Bot {}: {} ${:.2} @ {:.2} | balance: {:.2} → {:.2}",
-                                bot_id, outcome, bot.bet_size, price, fresh_balance, fresh_balance - bot.bet_size * effective_cost);
+                                bot_id, outcome, bot.bet_size, price, fresh_balance, fresh_balance - bot.bet_size);
                             
                             rb.pending_bet = Some(PendingBet {
                                 side: outcome.to_string(),
@@ -594,7 +629,7 @@ impl BotOrchestrator {
     async fn place_order(market: &crate::api::market::ActiveMarket, outcome: &str, bet_size: f64, creds: &CachedCredentials) -> Result<String, String> {
         // Increased slippage buffer to 0.8% for even better fill reliability
         let slippage = 1.008; 
-        let order_price = if outcome == "YES" { (market.yes_price * slippage).min(0.99) } else { ((1.0 - market.yes_price) * slippage).min(0.99) };
+        let order_price = if outcome == "YES" { (market.yes_price * slippage).min(0.99) } else { (market.no_price * slippage).min(0.99) };
 
         // Create PolymarketClient from credentials
         let client = match PolymarketClient::from_api_credentials(

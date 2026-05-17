@@ -10,7 +10,10 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "net"] }
+
+# Socket options (SO_REUSEADDR for Windows TIME_WAIT fix)
+socket2 = "0.5"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

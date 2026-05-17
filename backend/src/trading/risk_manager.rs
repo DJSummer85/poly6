@@ -50,14 +50,15 @@ impl RiskSettings {
     pub fn paper_mode() -> Self {
         Self {
             max_daily_loss: 20.0,
-            max_drawdown_percent: 30.0,  // FIX: 50% → 30%
-            min_confidence: 0.60,  // FIX: 45% → 60% (CRITICAL: 45% = guaranteed loss with fees)
-            cooldown_after_loss_secs: 30.0,  // FIX: 5 → 30 seconds
-            max_trades_per_hour: 10,  // FIX: 40 → 10
-            consecutive_loss_threshold: 5,  // FIX: 15 → 5
-            circuit_breaker_enabled: true,  // FIX: false → true (CRITICAL)
+            max_position_size: 50.0,  // Kelly számításból adódó tételek (~$7-15) ne legyenek blokkolva
+            max_drawdown_percent: 30.0,
+            min_confidence: 0.52,
+            cooldown_after_loss_secs: 30.0,
+            max_trades_per_hour: 10,
+            consecutive_loss_threshold: 5,
+            circuit_breaker_enabled: true,
             portfolio_max_loss: 25.0,
-            portfolio_max_drawdown: 40.0,  // FIX: 60% → 40%
+            portfolio_max_drawdown: 40.0,
             ..Self::default()
         }
     }
@@ -298,13 +299,10 @@ impl RiskManager {
             return (false, Some(msg));
         }
 
-        // FIX: Confidence check with fee buffer
-        // Need higher confidence to overcome Polymarket fees (~2%)
-        let fee_buffer = 0.02; // 2% fee
-        let effective_confidence = confidence - fee_buffer;
-        if effective_confidence < self.settings.min_confidence {
-            let msg = format!("Effective confidence {:.0}% below minimum {:.0}% (after {:.0}% fee buffer)",
-                effective_confidence * 100.0, self.settings.min_confidence * 100.0, fee_buffer * 100.0);
+        // Confidence check — a fee-ket már a Bayesian EV kezeli az orchestratorban
+        if confidence < self.settings.min_confidence {
+            let msg = format!("Confidence {:.0}% below minimum {:.0}%",
+                confidence * 100.0, self.settings.min_confidence * 100.0);
             return (false, Some(msg));
         }
 

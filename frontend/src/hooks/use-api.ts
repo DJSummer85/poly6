@@ -4,6 +4,7 @@ import { useAppStore } from "@/store";
 import type {
   Bot,
   BotRiskStatus,
+  BotRiskSnapshot,
   CreateBotRequest,
   LoginResponse,
   Market,
@@ -385,6 +386,40 @@ export function useResumeBotRisk() {
     mutationFn: async (id: number) => apiFetch(`/risk/bots/${id}/resume`, { method: "POST" }),
     onSuccess: (_, id) => {
       queryClient.invalidateQueries({ queryKey: ["risk-status", id] });
+    },
+  });
+}
+
+// === Risk Snapshots (persistent risk metrics) ===
+
+export function useRiskSnapshots() {
+  return useQuery({
+    queryKey: ["risk-snapshots"],
+    queryFn: () => apiFetch<BotRiskSnapshot[]>("/risk/snapshots"),
+    refetchInterval: 30000, // refresh every 30s
+    staleTime: 10000,
+    retry: false,
+  });
+}
+
+export function useSaveRiskSnapshot() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (data: {
+      bot_id: number;
+      risk_multiplier: number;
+      adjusted_confidence: number;
+      kelly_bet: number;
+      consecutive_losses: number;
+    }) =>
+      apiFetch<{ success: boolean }>("/risk/snapshots", {
+        method: "POST",
+        body: JSON.stringify(data),
+        headers: { "Content-Type": "application/json" },
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["risk-snapshots"] });
     },
   });
 }

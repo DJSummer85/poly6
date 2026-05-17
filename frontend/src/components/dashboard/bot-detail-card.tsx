@@ -6,6 +6,7 @@ import {
   DollarSign,
   Loader2,
   Play,
+  Shield,
   Square,
   TrendingDown,
   TrendingUp,
@@ -13,6 +14,7 @@ import {
 } from "lucide-react";
 import { usePortfolio } from "@/hooks";
 import { getStrategyColor } from "@/lib/utils";
+import { useAppStore } from "@/store";
 import type { Bot as BotType } from "@/types";
 import { LiveBotActivityCard } from "./live-bot-activity-card";
 
@@ -33,6 +35,7 @@ export function BotDetailCard({
 }) {
   const { data: portfolio } = usePortfolio(bot.id);
   const color = getStrategyColor(bot.strategy_type);
+  const riskMetrics = useAppStore((s) => s.botRiskMetrics[bot.id]);
 
   return (
     <motion.div
@@ -175,6 +178,61 @@ export function BotDetailCard({
         {(!portfolio || portfolio.balance == null || portfolio.total_trades === 0) && (
           <div className="rounded-lg bg-white/3 border border-white/5 px-3 py-2 text-center">
             <span className="text-[10px] text-zinc-500">Még nincsenek trading adatok</span>
+          </div>
+        )}
+
+        {/* Risk Metrics Panel */}
+        {riskMetrics && (
+          <div className="mt-3 rounded-lg border border-orange-500/15 bg-orange-500/[0.03] p-2.5">
+            <div className="flex items-center gap-1.5 mb-2">
+              <Shield className="h-3 w-3 text-orange-400" />
+              <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-400">Risk Metrics</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-md bg-white/[0.04] px-2 py-1.5">
+                <span className="text-[8px] uppercase text-zinc-500 font-semibold tracking-wider">Risk Multiplier</span>
+                <div className={`text-xs font-extrabold font-mono mt-0.5 ${
+                  riskMetrics.riskMultiplier >= 0.8 ? "text-green-400" :
+                  riskMetrics.riskMultiplier >= 0.5 ? "text-amber-400" :
+                  "text-red-400"
+                }`}>
+                  ×{riskMetrics.riskMultiplier.toFixed(3)}
+                </div>
+              </div>
+              <div className="rounded-md bg-white/[0.04] px-2 py-1.5">
+                <span className="text-[8px] uppercase text-zinc-500 font-semibold tracking-wider">Adjusted Confidence</span>
+                <div className="text-xs font-extrabold font-mono mt-0.5 text-indigo-400">
+                  {(riskMetrics.adjustedConfidence * 100).toFixed(1)}%
+                  <span className="text-[8px] text-zinc-600 font-normal ml-1">
+                    (adj.)
+                  </span>
+                </div>
+              </div>
+              <div className="rounded-md bg-white/[0.04] px-2 py-1.5">
+                <span className="text-[8px] uppercase text-zinc-500 font-semibold tracking-wider">Kelly Bet</span>
+                <div className="text-xs font-extrabold font-mono mt-0.5 text-amber-400">
+                  ${riskMetrics.kellyBet.toFixed(2)}
+                  <span className="text-[8px] text-zinc-600 font-normal ml-1">
+                    / ${bot.bet_size.toFixed(2)} max
+                  </span>
+                </div>
+              </div>
+              <div className="rounded-md bg-white/[0.04] px-2 py-1.5">
+                <span className="text-[8px] uppercase text-zinc-500 font-semibold tracking-wider">Consecutive Losses</span>
+                <div className={`text-xs font-extrabold font-mono mt-0.5 ${
+                  riskMetrics.consecutiveLosses === 0 ? "text-green-400" :
+                  riskMetrics.consecutiveLosses <= 2 ? "text-amber-400" :
+                  "text-red-400"
+                }`}>
+                  {riskMetrics.consecutiveLosses}
+                  {riskMetrics.consecutiveLosses > 0 && (
+                    <span className="text-[8px] text-zinc-600 font-normal ml-1">
+                      {riskMetrics.consecutiveLosses >= 5 ? "⚠️ MAX" : "streak"}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         )}
 

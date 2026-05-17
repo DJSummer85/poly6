@@ -110,7 +110,7 @@ pub struct StrategyParams {
 impl Default for StrategyParams {
     fn default() -> Self {
         Self {
-            min_delta: 0.001,        // FIX: 0.1% (volt: 0.0002 = 0.02%, túl alacsony)
+            min_delta: 0.0008,       // 0.08% — nyugodt piacon is beléphet, de nem zajra
             min_price: 0.30,
             max_price: 0.70,
             min_time_remaining: 15,  // FIX: 15 másodperc minimum (volt: 8)
@@ -201,20 +201,22 @@ impl StrategyExecutor {
             0.0
         };
 
-        if delta_pct > 0.12 && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.70_f64 + (delta_pct - 0.12) * 3.0).min(0.92_f64);
+        // Strong signal: delta > 0.18% → higher confidence, less noise
+        if delta_pct > 0.18 && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
+            let confidence = (0.74_f64 + (delta_pct - 0.18) * 2.0).min(0.92_f64);
             return Signal::Yes(confidence);
         }
-        if delta_pct < -0.12 && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.70_f64 + (-delta_pct - 0.12) * 3.0).min(0.92_f64);
+        if delta_pct < -0.18 && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
+            let confidence = (0.74_f64 + (-delta_pct - 0.18) * 2.0).min(0.92_f64);
             return Signal::No(confidence);
         }
-        if delta_pct > 0.07 && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.55_f64 + (delta_pct - 0.07) * 4.0).min(0.78_f64);
+        // Medium signal: delta > 0.10% → requires conviction
+        if delta_pct > 0.10 && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
+            let confidence = (0.58_f64 + (delta_pct - 0.10) * 2.0).min(0.78_f64);
             return Signal::Yes(confidence);
         }
-        if delta_pct < -0.07 && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.55_f64 + (-delta_pct - 0.07) * 4.0).min(0.78_f64);
+        if delta_pct < -0.10 && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
+            let confidence = (0.58_f64 + (-delta_pct - 0.10) * 2.0).min(0.78_f64);
             return Signal::No(confidence);
         }
 
@@ -300,10 +302,9 @@ impl StrategyExecutor {
             0.0
         };
 
-        // Overextended filter: if move is > 0.30%, it's likely to revert
-        let overextended_threshold = 0.0030;
+        // Overextended filter: if move is > 0.50%, it's likely to revert
+        let overextended_threshold = 0.0050;
         let threshold = self.params.min_delta * 1.2;
-        let polymarket_fee_rate = 0.02;
 
         if change.abs() > overextended_threshold {
             return Signal::Hold(format!("Overextended: {:.3}%", change * 100.0));
@@ -315,12 +316,10 @@ impl StrategyExecutor {
         let is_primary_trend_down = window_delta < 0.0005;
 
         if change > threshold && is_primary_trend_up && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            let raw_confidence = (0.56_f64 + change.abs() * 45.0 + window_delta.max(0.0) * 10.0).min(0.82_f64);
-            let confidence = raw_confidence * (1.0 - polymarket_fee_rate);
+            let confidence = (0.56_f64 + change.abs() * 45.0 + window_delta.max(0.0) * 10.0).min(0.82_f64);
             Signal::Yes(confidence)
         } else if change < -threshold && is_primary_trend_down && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let raw_confidence = (0.54_f64 + change.abs() * 40.0 + (-window_delta).max(0.0) * 10.0).min(0.78_f64);
-            let confidence = raw_confidence * (1.0 - polymarket_fee_rate);
+            let confidence = (0.54_f64 + change.abs() * 40.0 + (-window_delta).max(0.0) * 10.0).min(0.78_f64);
             Signal::No(confidence)
         } else {
             Signal::Hold(format!("No safe momentum: {:.4}% (window: {:.4}%)", change * 100.0, window_delta * 100.0))
@@ -462,8 +461,8 @@ impl StrategyExecutor {
             return Signal::Hold("High volatility - market unpredictable".to_string());
         }
 
-        let min_velocity: f64 = 0.00005;
-        let min_acceleration: f64 = 0.00001;
+        let min_velocity: f64 = 0.00002;
+        let min_acceleration: f64 = 0.000002;
 
         // Only hold when BOTH are weak (ÉS kapcsolat helyett VAGY)
         if velocity.abs() < min_velocity && acceleration.abs() < min_acceleration {
@@ -490,7 +489,7 @@ impl StrategyExecutor {
 
         let is_accelerating = (is_up && acceleration > 0.0) || (!is_up && acceleration < 0.0);
         let vel_strength = (velocity.abs() * 800.0).min(0.25);
-        let acc_boost = if is_accelerating { (acceleration.abs() * 800.0).min(0.15) } else { 0.0 };
+        let acc_boost = if is_accelerating { (acceleration.abs() * 10000.0).min(0.15) } else { 0.0 };
         let confidence = (0.55_f64 + vel_strength + acc_boost).min(0.80);
 
         tracing::info!(
@@ -525,10 +524,11 @@ impl StrategyExecutor {
         } else if ctx.yes_price < 0.45 && ctx.yes_price >= self.params.min_price && (change > min_change || window_delta > self.params.min_delta) {
             let conf = if both_confirm { 0.64 } else { 0.55 };
             Signal::Yes(conf)
-        } else if ctx.yes_price > 0.62 && ctx.yes_price <= self.params.max_price {
-            Signal::No(0.52)
-        } else if ctx.yes_price < 0.38 && ctx.yes_price >= self.params.min_price {
-            Signal::Yes(0.52)
+        // Extrém árfekvés: gyengébb BTC megerősítés is elég (csak short-term change, fele akkora küszöb)
+        } else if ctx.yes_price > 0.62 && ctx.yes_price <= self.params.max_price && change < -min_change * 0.5 {
+            Signal::No(0.55)
+        } else if ctx.yes_price < 0.38 && ctx.yes_price >= self.params.min_price && change > min_change * 0.5 {
+            Signal::Yes(0.55)
         } else {
             Signal::Hold(format!("Near fair value: {:.0}c", ctx.yes_price * 100.0))
         }
@@ -598,13 +598,13 @@ impl StrategyExecutor {
         let change = ctx.btc_change.unwrap_or(0.0);
         let min_change = self.params.min_delta * 0.5;
 
-        if ctx.yes_price < 0.15 && ctx.yes_price >= 0.04 && (delta_pct > 0.05 || change > min_change) {
-            let confidence = (0.55_f64 + (0.15 - ctx.yes_price) * 3.0).min(0.85_f64);
+        if ctx.yes_price < 0.25 && ctx.yes_price >= 0.04 && (delta_pct > 0.05 || change > min_change) {
+            let confidence = (0.55_f64 + (0.25 - ctx.yes_price) * 2.0).min(0.85_f64);
             return Signal::Yes(confidence);
         }
 
-        if ctx.no_price < 0.15 && ctx.no_price >= 0.04 && (delta_pct < -0.05 || change < -min_change) {
-            let confidence = (0.55_f64 + (0.15 - ctx.no_price) * 3.0).min(0.85_f64);
+        if ctx.no_price < 0.25 && ctx.no_price >= 0.04 && (delta_pct < -0.05 || change < -min_change) {
+            let confidence = (0.55_f64 + (0.25 - ctx.no_price) * 2.0).min(0.85_f64);
             return Signal::No(confidence);
         }
 
@@ -616,13 +616,16 @@ impl StrategyExecutor {
             return Signal::Hold("Too close to close".to_string());
         }
 
-        if ctx.yes_price < 0.15 {
-            let confidence = (0.60_f64 + (0.15 - ctx.yes_price) * 3.0).min(0.90_f64);
+        let change = ctx.btc_change.unwrap_or(0.0);
+        let min_change = self.params.min_delta * 0.5;
+
+        if ctx.yes_price < 0.25 && ctx.yes_price >= 0.04 && change > min_change {
+            let confidence = (0.60_f64 + (0.25 - ctx.yes_price) * 2.0).min(0.90_f64);
             return Signal::Yes(confidence);
         }
 
-        if ctx.no_price < 0.15 {
-            let confidence = (0.60_f64 + (0.15 - ctx.no_price) * 3.0).min(0.90_f64);
+        if ctx.no_price < 0.25 && ctx.no_price >= 0.04 && change < -min_change {
+            let confidence = (0.60_f64 + (0.25 - ctx.no_price) * 2.0).min(0.90_f64);
             return Signal::No(confidence);
         }
 
@@ -637,13 +640,13 @@ impl StrategyExecutor {
         let change = ctx.btc_change.unwrap_or(0.0);
         let min_change = self.params.min_delta * 0.5;
 
-        if ctx.yes_price < 0.15 && ctx.yes_price >= 0.04 && change > min_change {
-            let confidence = (0.55_f64 + (0.15 - ctx.yes_price) * 4.0).min(0.80_f64);
+        if ctx.yes_price < 0.25 && ctx.yes_price >= 0.04 && change > min_change {
+            let confidence = (0.55_f64 + (0.25 - ctx.yes_price) * 2.0).min(0.80_f64);
             return Signal::Yes(confidence);
         }
 
-        if ctx.no_price < 0.15 && ctx.no_price >= 0.04 && change < -min_change {
-            let confidence = (0.55_f64 + (0.15 - ctx.no_price) * 4.0).min(0.80_f64);
+        if ctx.no_price < 0.25 && ctx.no_price >= 0.04 && change < -min_change {
+            let confidence = (0.55_f64 + (0.25 - ctx.no_price) * 2.0).min(0.80_f64);
             return Signal::No(confidence);
         }
 
@@ -655,6 +658,7 @@ impl StrategyExecutor {
             return Signal::Hold("Too close to close".to_string());
         }
 
+        // Calculate BTC delta and signal strength
         let window_open = ctx.btc_window_open.unwrap_or(ctx.btc_price);
         let delta_pct = if window_open > 0.0 {
             ((ctx.btc_price - window_open) / window_open) * 100.0
@@ -669,27 +673,55 @@ impl StrategyExecutor {
             return Signal::Hold("Insufficient BTC delta".to_string());
         }
 
-        let fair_up_prob = (0.5_f64 + (combined_delta / 0.05).tanh() * 0.45)
+        // Bayesian prior: 0.50 (neutral for 5-min BTC market)
+        // Signal strength from combined delta (0.0 to 1.0)
+        let signal_strength = (combined_delta.abs() / 0.30).clamp(0.0, 1.0); // 0.30% = max signal
+
+        // Likelihood: how informative is the signal
+        // strength=0.0 → likelihood=0.50 (uninformative)
+        // strength=1.0 → likelihood=0.90 (very informative)
+        let likelihood = 0.50 + signal_strength * 0.40;
+
+        // Bayesian posterior: P(side | signal) = prior * likelihood / evidence
+        let prior_up = 0.50;
+        let evidence_yes = prior_up * likelihood + (1.0 - prior_up) * (1.0 - likelihood);
+        let bayes_up_prob = if evidence_yes > 0.0 {
+            (prior_up * likelihood) / evidence_yes
+        } else {
+            0.50
+        };
+
+        // Blend Bayesian posterior with raw delta-based estimate
+        let delta_estimate = 0.50 + (combined_delta / 0.30).clamp(-0.35, 0.35);
+        let blend_weight = signal_strength * 0.5; // Max 50% weight to Bayesian
+        let fair_up_prob = (bayes_up_prob * blend_weight + delta_estimate * (1.0 - blend_weight))
             .clamp(0.03, 0.97);
-        let edge = fair_up_prob - ctx.yes_price;
 
-        if edge.abs() < 0.05 {
-            return Signal::Hold("Edge too small".to_string());
-        }
+        // EV calculation using proper formula: EV = P × (1-cost) × (1-fee) - (1-P) × cost
+        let polymarket_fee = 0.02;
+        let cost_yes = ctx.yes_price;
+        let cost_no = ctx.no_price;
 
-        if edge > 0.05 && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
-            let b = if ctx.yes_price > 0.0 { (1.0 - ctx.yes_price) / ctx.yes_price } else { 1.0 };
-            let kelly = (b * fair_up_prob - (1.0 - fair_up_prob)) / b;
-            if kelly <= 0.0 {
-                return Signal::Hold("Negative Kelly".to_string());
-            }
-            let confidence = (0.50_f64 + edge * 3.0).min(0.82_f64);
+        // Evaluate YES side
+        let ev_yes = fair_up_prob * (1.0 - cost_yes) * (1.0 - polymarket_fee)
+            - (1.0 - fair_up_prob) * cost_yes;
+
+        // Evaluate NO side
+        let fair_down_prob = 1.0 - fair_up_prob;
+        let ev_no = fair_down_prob * (1.0 - cost_no) * (1.0 - polymarket_fee)
+            - (1.0 - fair_down_prob) * cost_no;
+
+        let min_edge = 0.05; // Minimum edge threshold
+
+        if ev_yes > ev_no && ev_yes > min_edge && self.check_price_limits("YES", ctx.yes_price, ctx.no_price) {
+            // Confidence from EV strength, mapped to [0.50, 0.85]
+            let confidence = (0.50_f64 + ev_yes * 3.0).min(0.85_f64);
             Signal::Yes(confidence)
-        } else if -edge > 0.05 && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
-            let confidence = (0.50_f64 + (-edge) * 3.0).min(0.82_f64);
+        } else if ev_no > ev_yes && ev_no > min_edge && self.check_price_limits("NO", ctx.yes_price, ctx.no_price) {
+            let confidence = (0.50_f64 + ev_no * 3.0).min(0.85_f64);
             Signal::No(confidence)
         } else {
-            Signal::Hold("No Bayesian edge".to_string())
+            Signal::Hold(format!("No Bayesian edge: EV_YES={:.4} EV_NO={:.4}", ev_yes, ev_no))
         }
     }
 

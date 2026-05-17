@@ -88,6 +88,27 @@ interface AppState {
   };
   setLatency: (latencyMs: number) => void;
 
+  // Bot Risk Metrics (from the integrated confidence/EV/Kelly pipeline)
+  botRiskMetrics: Record<
+    number,
+    {
+      riskMultiplier: number;
+      kellyBet: number;
+      adjustedConfidence: number;
+      consecutiveLosses: number;
+      timestamp: number;
+    }
+  >;
+  setBotRiskMetrics: (
+    botId: number,
+    metrics: {
+      riskMultiplier: number;
+      kellyBet: number;
+      adjustedConfidence: number;
+      consecutiveLosses: number;
+    }
+  ) => void;
+
   // Bot Activity Feed
   botActivities: Record<
     number,
@@ -127,6 +148,7 @@ interface AppState {
   // Dashboard Panels
   panels: {
     marketData: boolean;
+    riskMetrics: boolean;
     tradeAndChart: boolean;
     botsAndPositions: boolean;
     history: boolean;
@@ -254,6 +276,16 @@ export const useAppStore = create<AppState>()(
           };
         }),
 
+      // Bot Risk Metrics
+      botRiskMetrics: {},
+      setBotRiskMetrics: (botId, metrics) =>
+        set((state) => ({
+          botRiskMetrics: {
+            ...state.botRiskMetrics,
+            [botId]: { ...metrics, timestamp: Date.now() },
+          },
+        })),
+
       // Bot Activity Feed
       botActivities: {},
       addBotActivity: (botId, activity) =>
@@ -294,6 +326,7 @@ export const useAppStore = create<AppState>()(
       // Dashboard Panels
       panels: {
         marketData: true,
+        riskMetrics: true,
         tradeAndChart: true,
         botsAndPositions: true,
         history: true,

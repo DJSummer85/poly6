@@ -6,7 +6,7 @@ import { CommandCenter } from "@/components/dashboard/command-center";
 import { Header } from "@/components/layout/header";
 import { Sidebar } from "@/components/layout/sidebar";
 import { AmbientGlow } from "@/components/ui/ambient-glow";
-import { useBtcPrice, usePositions, useSSE, useUser } from "@/hooks";
+import { useBtcPrice, usePositions, useRiskSnapshots, useSSE, useUser } from "@/hooks";
 import { useAppStore } from "@/store";
 
 export function Dashboard() {
@@ -41,6 +41,28 @@ export function Dashboard() {
   useEffect(() => {
     if (positionsData) setPositions(positionsData);
   }, [positionsData, setPositions]);
+
+  // Load persisted risk snapshots from backend into the store
+  // This ensures risk metrics survive page reloads
+  const { data: riskSnapshots } = useRiskSnapshots();
+
+  useEffect(() => {
+    if (riskSnapshots && riskSnapshots.length > 0) {
+      const store = useAppStore.getState();
+      for (const snap of riskSnapshots) {
+        // Only hydrate from snapshots if the store doesn't already have live SSE data
+        // This prevents refetches from overwriting real-time SSE updates
+        if (!store.botRiskMetrics[snap.bot_id]) {
+          store.setBotRiskMetrics(snap.bot_id, {
+            riskMultiplier: snap.risk_multiplier,
+            adjustedConfidence: snap.adjusted_confidence,
+            kellyBet: snap.kelly_bet,
+            consecutiveLosses: snap.consecutive_losses,
+          });
+        }
+      }
+    }
+  }, [riskSnapshots]);
 
   const { sidebarCollapsed } = useAppStore();
 

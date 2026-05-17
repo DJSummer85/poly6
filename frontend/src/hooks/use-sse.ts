@@ -2,10 +2,45 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { createSSEConnection, useAppStore } from "@/store";
+import { apiFetch } from "@/lib/utils";
 
 // Module-level singleton to prevent multiple SSE connections
 let sharedEventSource: EventSource | null = null;
 let listenerCount = 0;
+
+// Debounced risk metrics persistence to backend
+// Prevents spamming the API when multiple trade_decision events arrive quickly
+const lastSaveTime: Record<number, number> = {};
+const SAVE_THROTTLE_MS = 5000; // Max once every 5 seconds per bot
+
+function saveRiskMetricsToBackend(
+  botId: number,
+  riskMultiplier: number,
+  adjustedConfidence: number,
+  kellyBet: number,
+  consecutiveLosses: number
+) {
+  const now = Date.now();
+  if (lastSaveTime[botId] && now - lastSaveTime[botId] < SAVE_THROTTLE_MS) {
+    return; // Throttled
+  }
+  lastSaveTime[botId] = now;
+
+  apiFetch<{ success: boolean }>("/risk/snapshots", {
+    method: "POST",
+    body: JSON.stringify({
+      bot_id: botId,
+      risk_multiplier: riskMultiplier,
+      adjusted_confidence: adjustedConfidence,
+      kelly_bet: kellyBet,
+      consecutive_losses: consecutiveLosses,
+    }),
+    headers: { "Content-Type": "application/json" },
+  }).catch((err) => {
+    // Silent fail — don't block the SSE flow for persistence errors
+    console.warn("Failed to save risk snapshot:", err);
+  });
+}
 
 export function useSSE() {
   const prevEventStartTimeRef = useRef<number>(0);
@@ -185,7 +220,26 @@ export function useSSE() {
           case "trade_decision": {
             const outcomeText = data.outcome === "YES" ? "UP" : "DOWN";
             const confidencePct = (data.confidence * 100).toFixed(0);
-            
+
+            // Extract risk metrics from the backend event and persist them
+            if (data.risk_multiplier !== undefined && data.adjusted_confidence !== undefined) {
+              useAppStore.getState().setBotRiskMetrics(data.bot_id, {
+                riskMultiplier: data.risk_multiplier,
+                kellyBet: data.kelly_bet ?? 0,
+                adjustedConfidence: data.adjusted_confidence,
+                consecutiveLosses: data.consecutive_losses ?? 0,
+              });
+
+              // Persist to backend API (throttled per bot)
+              saveRiskMetricsToBackend(
+                data.bot_id,
+                data.risk_multiplier,
+                data.adjusted_confidence,
+                data.kelly_bet ?? 0,
+                data.consecutive_losses ?? 0
+              );
+            }
+
             // Hungarian translation for thoughts console
             const translateSignal = (reason: string) => {
               const r = reason.toLowerCase();
@@ -247,6 +301,10 @@ export function useSSE() {
                 betSize: data.bet_size,
                 confidence: data.confidence,
                 reason: data.reason,
+                riskMultiplier: data.risk_multiplier,
+                adjustedConfidence: data.adjusted_confidence,
+                kellyBet: data.kelly_bet,
+                consecutiveLosses: data.consecutive_losses,
               },
             });
             break;

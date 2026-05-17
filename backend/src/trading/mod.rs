@@ -12,6 +12,7 @@ pub mod bot_loss_tracker;
 pub mod market_data;
 pub mod execution;
 pub mod settlement;
+pub mod confidence;
 
 pub use binance::client::btc_price_stream;
 pub use binance::client::BinanceClient;

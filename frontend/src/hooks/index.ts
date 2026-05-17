@@ -14,6 +14,7 @@ export {
   usePlaceOrder,
   usePortfolio,
   usePositions,
+  useRiskSnapshots,
   useRunAllBots,
   useSettings,
   useStartBot,

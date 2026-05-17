@@ -24,6 +24,7 @@ import { BotSelector } from "@/components/dashboard/bot-selector";
 import { ChartPanel } from "@/components/dashboard/chart-panel";
 import { MarketHistory } from "@/components/dashboard/market-history";
 import { QuickTradePanel } from "@/components/dashboard/quick-trade-panel";
+import { RiskMetricsPanel } from "@/components/dashboard/risk-metrics-panel";
 import { StrategyPerformance } from "@/components/dashboard/strategy-performance";
 import { SystemHealth } from "@/components/dashboard/system-health";
 import { TradeFeed } from "@/components/dashboard/trade-feed";
@@ -450,7 +451,18 @@ export function CommandCenter() {
         <MarketBar />
       </CollapsiblePanel>
 
-      {/* 3. Trading & Chart */}
+      {/* 3. Risk Metrics */}
+      <CollapsiblePanel
+        title="Risk Metrics"
+        icon={<Shield className="h-4 w-4" />}
+        isOpen={panels.riskMetrics}
+        onToggle={() => togglePanel("riskMetrics")}
+        bodyClassName="p-4"
+      >
+        <RiskMetricsPanel />
+      </CollapsiblePanel>
+
+      {/* 4. Trading & Chart */}
       <CollapsiblePanel
         title="Trading & Chart"
         icon={<LineChart className="h-4 w-4" />}

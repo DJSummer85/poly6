@@ -85,6 +85,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3001));
     tracing::info!("Listening on {} — bots will only start when manually triggered", addr);
-    axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+
+    // Use socket2 with SO_REUSEADDR to handle Windows TIME_WAIT on port
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&socket2::SockAddr::from(addr))?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    let std_listener: std::net::TcpListener = socket.into();
+    let listener = tokio::net::TcpListener::from_std(std_listener)?;
+
+    axum::serve(listener, app).await?;
     Ok(())
 }

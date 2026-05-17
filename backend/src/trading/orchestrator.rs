@@ -14,6 +14,7 @@ use crate::db::BotRecord;
 use crate::trading::bot_executor::strategies::{Signal, StrategyExecutor, StrategyContext, MarketSnapshot};
 use crate::trading::risk_manager::RiskManager;
 use crate::trading::bot_loss_tracker::BotLossTrackerManager;
+use crate::trading::confidence;
 use crate::trading::strategy_coordinator::StrategyCoordinator;
 use crate::api::market::fetch_active_markets;
 use crate::api::CachedCredentials;
@@ -23,7 +24,7 @@ use crate::trading::polymarket::{PolymarketClient, OrderRequest};
 pub enum BotEvent {
     SessionStarted { bot_id: i64, session_id: i64, bot_name: String },
     SessionEnded { bot_id: i64, session_id: i64, final_balance: f64, total_pnl: f64 },
-    TradeDecision { bot_id: i64, bot_name: String, outcome: String, confidence: f64, bet_size: f64, reason: String, asset: String },
+    TradeDecision { bot_id: i64, bot_name: String, outcome: String, confidence: f64, bet_size: f64, reason: String, asset: String, risk_multiplier: f64, kelly_bet: f64, adjusted_confidence: f64, consecutive_losses: u32 },
     OrderExecuted { bot_id: i64, order_id: String },
     BalanceUpdated { bot_id: i64, balance: f64 },
     MarketTransition { new_market_slug: String },
@@ -374,6 +375,13 @@ impl BotOrchestrator {
         let market_slug = market.condition_id.clone();
         self.event_sender.send(BotEvent::Scanning { bot_id, market_slug: market_slug.clone(), asset: market.asset.clone() }).ok();
 
+        // Ha még nincs window_open beállítva (pl. restore utáni első ciklus,
+        // vagy amikor korábban nem volt elérhető piac), állítsuk be most
+        if rb.btc_window_open.is_none() {
+            rb.btc_window_open = Some(asset_price);
+            eprintln!("[MARKET] Bot {} initial window_open set to {:.2}", bot_id, asset_price);
+        }
+
         let market_ended = market.time_remaining <= 5;
         let market_changed = rb.last_market_slug.as_ref() != Some(&market_slug);
         
@@ -384,12 +392,24 @@ impl BotOrchestrator {
                 let diff = (current_settle_price - bet.start_price) / bet.start_price;
 
                 let won = if let Some(ptb) = bet.price_to_beat {
+                    // 1st choice: stored price_to_beat from when the bet was placed
                     let is_won = if bet.side == "YES" { current_settle_price >= ptb } else { current_settle_price < ptb };
                     tracing::info!("[SETTLE] Bot {}: {} Target={:.2} Final={:.2} Won={}", bot_id, bet.side, ptb, current_settle_price, is_won);
                     is_won
+                } else if let Some(market_ptb) = market.price_to_beat {
+                    // 2nd choice: fresh price_to_beat from the active market
+                    let is_won = if bet.side == "YES" { current_settle_price >= market_ptb } else { current_settle_price < market_ptb };
+                    tracing::info!("[SETTLE] Bot {}: {} fresh_market_ptb={:.2} Final={:.2} Won={}", bot_id, bet.side, market_ptb, current_settle_price, is_won);
+                    is_won
                 } else {
-                    tracing::error!("[SETTLEMENT] Missing price_to_beat for bot {}. Falling back to start_price: {:.2}", bot_id, bet.start_price);
-                    if bet.side == "YES" { current_settle_price >= bet.start_price } else { current_settle_price < bet.start_price }
+                    // 3rd choice: fallback — check if price moved in our direction
+                    // For a 5-min Polymarket BTC market, if we can't get the exact price_to_beat,
+                    // we compare the direction: if price went up and we bet YES, that's likely a win.
+                    let moved_up = current_settle_price > bet.start_price;
+                    let moved_same_direction = (bet.side == "YES" && moved_up) || (bet.side == "NO" && !moved_up);
+                    tracing::warn!("[SETTLEMENT] Missing price_to_beat for bot {}. Using direction fallback: start={:.2} → final={:.2}, moved_same_direction={}",
+                        bot_id, bet.start_price, current_settle_price, moved_same_direction);
+                    moved_same_direction
                 };
                 
                 let polymarket_fee_rate = 0.02;
@@ -425,6 +445,15 @@ impl BotOrchestrator {
                 {
                     let mut rm = self.risk_manager.write().await;
                     rm.record_trade_result(bot_id, won);
+                }
+
+                // FIX: Update the loss tracker so that adjust_confidence() and get_risk_multiplier()
+                // have up-to-date consecutive loss/win data (was previously dead code!)
+                {
+                    let mut lt = self.loss_tracker.write().await;
+                    // New balance = pre-settlement balance + PnL
+                    let new_balance = fresh_balance_for_stop + pnl_for_stats;
+                    lt.update_settlement(bot_id, won, pnl_for_stats, new_balance);
                 }
 
                 rb.pending_bet = None;
@@ -476,6 +505,10 @@ impl BotOrchestrator {
         // MINDEN szignált (a HOLD-ot is) elküldünk az SSE-n, hogy látszódjon a webes konzolban
         match &signal {
             Signal::Hold(reason) => {
+                // No risk metrics computed for Hold (no trade attempted)
+                let lt = self.loss_tracker.read().await;
+                let consec_losses = lt.get_consecutive_losses(bot_id);
+                drop(lt);
                 self.event_sender.send(BotEvent::TradeDecision { 
                     bot_id, 
                     bot_name: rb.bot_name.clone(),
@@ -483,45 +516,91 @@ impl BotOrchestrator {
                     confidence: 0.0, 
                     bet_size: 0.0, 
                     reason: reason.clone(),
-                    asset: market.asset.clone() 
+                    asset: market.asset.clone(),
+                    risk_multiplier: 1.0,
+                    kelly_bet: 0.0,
+                    adjusted_confidence: 0.0,
+                    consecutive_losses: consec_losses,
                 }).ok();
             },
             Signal::Yes(conf) | Signal::No(conf) => {
                 let outcome = if matches!(signal, Signal::Yes(_)) { "YES" } else { "NO" };
                 
                 if rb.pending_bet.is_none() {
-                    let slippage_sim = 1.005; // 0.5% slippage for paper trading
+                    let slippage_sim = 1.005;
                     let price = if outcome == "YES" { (market.yes_price * slippage_sim).min(0.99) } else { (market.no_price * slippage_sim).min(0.99) };
                     let effective_cost = price;
 
-                    // EV and Time check
                     let polymarket_fee_rate = 0.02;
-                    let min_conf_threshold = 0.55; // Lowered from 0.64 to allow more frequent trades
-                    
-                    // Valódi EV képlet (Expected Value)
-                    // EV = valószínűség * nyereség - (1 - valószínűség) * veszteség
-                    // Nyereség: (1.0 - effective_cost) * (1.0 - fee)
-                    // Veszteség: effective_cost
-                    let win_prob = *conf;
-                    let net_profit_if_win = (1.0 - effective_cost) * (1.0 - polymarket_fee_rate);
-                    let loss_if_fail = effective_cost;
-                    
-                    let expected_value = (win_prob * net_profit_if_win) - ((1.0 - win_prob) * loss_if_fail);
-                    let expected_value_positive = expected_value > 0.0 && *conf >= min_conf_threshold;
-                    
+                    let min_conf_threshold = 0.52;
+
+                    // === INTEGRATED CONFIDENCE + EV + KELLY PIPELINE ===
+                    // Ported from polymarket-demo TypeScript: calculate7FactorConfidence(), calculateEV(), calculateBetSize()
+
+                    // Step 1: Adjust confidence using loss tracker (performance feedback)
+                    let adjusted_conf = {
+                        let mut lt = self.loss_tracker.write().await;
+                        lt.adjust_confidence(bot_id, *conf, fresh_balance_for_stop)
+                    };
+
+                    // Step 2: Calculate BTC signal strength for Bayesian update
+                    let btc_signal_strength = asset_change
+                        .map(|c| (c.abs() * 500.0).clamp(0.0, 1.0))
+                        .unwrap_or(0.0);
+
+                    // Step 3: Bayesian EV with proper formula
+                    // EV = P(win) × (1 - cost) × (1 - fee) - P(lose) × cost
+                    let (bayes_prob, expected_value) = confidence::calculate_bayesian_ev(
+                        adjusted_conf,
+                        effective_cost,
+                        polymarket_fee_rate,
+                        btc_signal_strength,
+                    );
+
+                    // Step 4: Get risk multiplier from loss tracker (consecutive loss / drawdown)
+                    let (risk_mult, consecutive_losses) = {
+                        let mut lt = self.loss_tracker.write().await;
+                        let rm = lt.get_risk_multiplier(bot_id, fresh_balance_for_stop);
+                        let info = lt.get_tracker_info(bot_id, fresh_balance_for_stop);
+                        (rm, info.consecutive_losses)
+                    };
+
+                    // Step 5: Calculate half-Kelly bet size with risk multiplier
+                    let kelly_fraction = bot.kelly_fraction.max(0.1);
+                    let max_bet_fraction = 0.25; // Max 25% of bankroll per trade
+                    let min_bet = 0.10; // Fixed minimum bet ($0.10)
+                    let max_bet = bot.bet_size.max(min_bet); // bet_size = maximum cap (user-facing setting)
+
+                    let kelly_bet = confidence::calculate_half_kelly_bet(
+                        fresh_balance_for_stop,
+                        bayes_prob,
+                        effective_cost,
+                        kelly_fraction,
+                        risk_mult,
+                        max_bet_fraction,
+                        min_bet,
+                    );
+
+                    // Use Kelly bet if positive edge exists, otherwise use min_bet
+                    // Then cap at max_bet (the bot's bet_size setting)
+                    let mut final_bet = if kelly_bet > 0.0 { kelly_bet.max(min_bet) } else { min_bet };
+                    final_bet = final_bet.min(max_bet); // Hard cap at bet_size
+
+                    let expected_value_positive = expected_value > 0.0 && bayes_prob >= min_conf_threshold;
+
                     // Prevent momentum entry in last 60s (too risky)
                     let time_is_okay = market.time_remaining > 60 || rb.strategy_type == "last_seconds_scalp";
 
                     let (can_trade, block_reason) = if !expected_value_positive {
-                        (false, Some(format!("Low EV/Conf (conf {:.2} < threshold {:.2})", conf, (effective_cost + polymarket_fee_rate).max(min_conf_threshold))))
+                        (false, Some(format!("Low EV/Conf (prob {:.2} < threshold {:.2}, EV={:.4})", bayes_prob, min_conf_threshold, expected_value)))
                     } else if !time_is_okay {
                         (false, Some(format!("Too late to trade ({}s remaining)", market.time_remaining)))
                     } else {
                         let mut rm = self.risk_manager.write().await;
                         rm.can_open_position(
                             bot_id,
-                            bot.bet_size,
-                            *conf,
+                            final_bet,
+                            bayes_prob,
                             fresh_balance_for_stop,
                             portfolio.initial_balance,
                         )
@@ -529,57 +608,69 @@ impl BotOrchestrator {
 
                     if !can_trade {
                         let reason = block_reason.unwrap_or_else(|| "Risk blocked".into());
-                        tracing::info!("[RISK] Bot {} blocked: {}", bot_id, reason);
+                        tracing::info!("[RISK] Bot {} blocked: {} (risk_mult={:.2}, adj_conf={:.2}, kelly={:.2})",
+                            bot_id, reason, risk_mult, adjusted_conf, kelly_bet);
                         eprintln!("[RISK] Bot {} blocked: {}", bot_id, reason);
-                        
-                        // SSE-n is elküldjük, hogy miért lett blokkolva a belépés
-                        self.event_sender.send(BotEvent::TradeDecision { 
-                            bot_id, 
+
+                        self.event_sender.send(BotEvent::TradeDecision {
+                            bot_id,
                             bot_name: rb.bot_name.clone(),
-                            outcome: "HOLD".to_string(), 
-                            confidence: *conf, 
-                            bet_size: 0.0, 
+                            outcome: "HOLD".to_string(),
+                            confidence: bayes_prob,
+                            bet_size: 0.0,
                             reason: format!("RISK BLOCKED: {}", reason),
-                            asset: market.asset.clone() 
+                            asset: market.asset.clone(),
+                            risk_multiplier: risk_mult,
+                            kelly_bet,
+                            adjusted_confidence: adjusted_conf,
+                            consecutive_losses,
                         }).ok();
                     } else {
-                        self.event_sender.send(BotEvent::TradeDecision { 
-                            bot_id, 
+                        self.event_sender.send(BotEvent::TradeDecision {
+                            bot_id,
                             bot_name: rb.bot_name.clone(),
-                            outcome: outcome.to_string(), 
-                            confidence: *conf, 
-                            bet_size: bot.bet_size, 
-                            reason: "Signal detected & Risk approved".into(),
-                            asset: market.asset.clone() 
+                            outcome: outcome.to_string(),
+                            confidence: bayes_prob,
+                            bet_size: final_bet,
+                            reason: format!("Signal approved (risk_mult={:.2}, conf={:.2}, EV={:.4})", risk_mult, bayes_prob, expected_value),
+                            asset: market.asset.clone(),
+                            risk_multiplier: risk_mult,
+                            kelly_bet,
+                            adjusted_confidence: adjusted_conf,
+                            consecutive_losses,
                         }).ok();
-                        
+
                         if bot.trading_mode == "live" {
                             if let Some(ref cache) = credential_cache {
                                 let c = cache.read().await;
                                 if let Some(creds) = c.get(&user_id) {
-                                    // CRITICAL: A biztonsági ellenőrzést (EV) már feljebb elvégeztük.
-                                    // Itt már csak a live order beküldése történik.
-                                    let _ = Self::place_order(&market, outcome, bot.bet_size, creds).await;
+                                    let _ = Self::place_order(&market, outcome, final_bet, creds).await;
                                 }
                             }
                         } else {
-                            let d_id = queries::log_trade_decision(&self.db, bot_id, rb.session_id, user_id, &market_slug, &market.condition_id, outcome, &bot.strategy_type, *conf, Some(asset_price), asset_change, Some(market.yes_price), Some(market.no_price), Some(market.time_remaining), "paper trade").await.unwrap_or(0);
-                            
+                            let d_id = queries::log_trade_decision(&self.db, bot_id, rb.session_id, user_id, &market_slug, &market.condition_id, outcome, &bot.strategy_type, bayes_prob, Some(asset_price), asset_change, Some(market.yes_price), Some(market.no_price), Some(market.time_remaining), "paper trade").await.unwrap_or(0);
+
                             let fresh_balance = queries::get_portfolio(&self.db, bot_id, user_id)
                                 .await
                                 .ok()
                                 .flatten()
                                 .map(|p| p.balance)
                                 .unwrap_or(portfolio.balance);
-                            
-                            queries::update_portfolio_balance(&self.db, bot_id, fresh_balance - bot.bet_size).await.ok();
-                            eprintln!("[BET] Bot {}: {} ${:.2} @ {:.2} | balance: {:.2} → {:.2}",
-                                bot_id, outcome, bot.bet_size, price, fresh_balance, fresh_balance - bot.bet_size);
-                            
+
+                            queries::update_portfolio_balance(&self.db, bot_id, fresh_balance - final_bet).await.ok();
+                            eprintln!("[BET] Bot {}: {} ${:.2} @ {:.2} | balance: {:.2} → {:.2} (risk_mult={:.2}, conf={:.2})",
+                                bot_id, outcome, final_bet, price, fresh_balance, fresh_balance - final_bet, risk_mult, bayes_prob);
+
+                            // Notify loss tracker that a trade was sent (pending settlement)
+                            {
+                                let mut lt = self.loss_tracker.write().await;
+                                lt.mark_trade_sent(bot_id);
+                            }
+
                             rb.pending_bet = Some(PendingBet {
                                 side: outcome.to_string(),
                                 asset: market.asset.clone(),
-                                bet_size: bot.bet_size,
+                                bet_size: final_bet,
                                 start_price: asset_price,
                                 entry_price: price,
                                 decision_id: d_id,
@@ -587,12 +678,12 @@ impl BotOrchestrator {
                                 market_end_time: market.end_time,
                             });
                             rb.last_trade_time = Some(Instant::now());
-                            
+
                             // Telegram értesítés trade indításról
                             if let Some(ref telegram) = self.telegram_service {
                                 let msg = format!(
-                                    "🚀 <b>Bot Trade Opened</b>\n\nBot: <b>{}</b>\nIrány: <b>{}</b>\nTét: <b>${:.2}</b>\nÁr: ${:.2} ({})",
-                                    bot.name, outcome, bot.bet_size, asset_price, market.asset
+                                    "🚀 <b>Bot Trade Opened</b>\n\nBot: <b>{}</b>\nIrány: <b>{}</b>\nTét: <b>${:.2}</b>\nÁr: ${:.2} ({})\nConf: {:.1}% | RiskMult: {:.2}x",
+                                    bot.name, outcome, final_bet, asset_price, market.asset, bayes_prob * 100.0, risk_mult
                                 );
                                 let t = telegram.clone();
                                 tokio::spawn(async move {
@@ -600,7 +691,7 @@ impl BotOrchestrator {
                                 });
                             }
 
-                            self.event_sender.send(BotEvent::PositionUpdate { bot_id, side: outcome.to_string(), size: bot.bet_size, price, unrealized_pnl: 0.0 }).ok();
+                            self.event_sender.send(BotEvent::PositionUpdate { bot_id, side: outcome.to_string(), size: final_bet, price, unrealized_pnl: 0.0 }).ok();
                         }
                     }
                 }

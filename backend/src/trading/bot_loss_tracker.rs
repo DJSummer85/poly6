@@ -178,6 +178,11 @@ impl BotLossTrackerManager {
         }
     }
 
+    /// Get consecutive losses count for a bot (read-only, no side effects)
+    pub fn get_consecutive_losses(&self, bot_id: i64) -> u32 {
+        self.trackers.get(&bot_id).map(|t| t.consecutive_losses).unwrap_or(0)
+    }
+
     /// Clear a bot's tracker
     pub fn clear_bot(&mut self, bot_id: i64) {
         self.trackers.remove(&bot_id);

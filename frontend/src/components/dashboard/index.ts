@@ -1,5 +1,6 @@
 export { ActivityTabs } from "./activity-tabs";
 export { AuthLanding } from "./auth-landing";
+export { RiskMetricsPanel } from "./risk-metrics-panel";
 export { BotSelector } from "./bot-selector";
 export { ChartPanel } from "./chart-panel";
 export { CommandCenter } from "./command-center";

@@ -455,6 +455,38 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         }
     }
 
+    // Bot risk snapshots - persistent storage of risk metrics for frontend
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS bot_risk_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            risk_multiplier REAL NOT NULL DEFAULT 1.0,
+            adjusted_confidence REAL NOT NULL DEFAULT 0.5,
+            kelly_bet REAL NOT NULL DEFAULT 0.0,
+            consecutive_losses INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (bot_id) REFERENCES bot_configs(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_risk_snapshots_bot ON bot_risk_snapshots(bot_id)"
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_risk_snapshots_user ON bot_risk_snapshots(user_id, created_at DESC)"
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!("Database migrations completed");
     Ok(())
 }
@@ -1812,6 +1844,61 @@ sqlx::query(
         .await?;
         Ok(())
     }
+
+    // === Risk Snapshots ===
+
+    /// Save a risk metrics snapshot for a bot
+    pub async fn save_risk_snapshot(
+        db: &Db,
+        bot_id: i64,
+        user_id: i64,
+        risk_multiplier: f64,
+        adjusted_confidence: f64,
+        kelly_bet: f64,
+        consecutive_losses: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO bot_risk_snapshots
+                (bot_id, user_id, risk_multiplier, adjusted_confidence, kelly_bet, consecutive_losses)
+            VALUES (?, ?, ?, ?, ?, ?)
+            "#
+        )
+        .bind(bot_id)
+        .bind(user_id)
+        .bind(risk_multiplier)
+        .bind(adjusted_confidence)
+        .bind(kelly_bet)
+        .bind(consecutive_losses)
+        .execute(db.as_ref())
+        .await?;
+        Ok(())
+    }
+
+    /// Get the latest risk snapshot for each of the user's bots
+    pub async fn get_latest_risk_snapshots(
+        db: &Db,
+        user_id: i64,
+    ) -> Result<Vec<RiskSnapshotRecord>, sqlx::Error> {
+        let result = sqlx::query_as::<_, RiskSnapshotRecord>(
+            r#"
+            SELECT s.bot_id, s.risk_multiplier, s.adjusted_confidence, s.kelly_bet,
+                   s.consecutive_losses, s.created_at
+            FROM bot_risk_snapshots s
+            INNER JOIN (
+                SELECT bot_id, MAX(created_at) AS max_created
+                FROM bot_risk_snapshots
+                WHERE user_id = ?
+                GROUP BY bot_id
+            ) latest ON s.bot_id = latest.bot_id AND s.created_at = latest.max_created
+            "#
+        )
+        .bind(user_id)
+        .fetch_all(db.as_ref())
+        .await?;
+
+        Ok(result)
+    }
 }
 
 // === Data Records (structs) ===
@@ -1929,6 +2016,17 @@ pub struct TradeDecisionRecord {
     pub executed: i64,
     pub order_id: Option<String>,
     pub pnl: Option<f64>,
+    pub created_at: String,
+}
+
+/// Bot risk snapshot record - latest risk metrics per bot
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RiskSnapshotRecord {
+    pub bot_id: i64,
+    pub risk_multiplier: f64,
+    pub adjusted_confidence: f64,
+    pub kelly_bet: f64,
+    pub consecutive_losses: i64,
     pub created_at: String,
 }
 

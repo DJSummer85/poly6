@@ -354,7 +354,7 @@ pub async fn bot_events_stream(
                                         "seq": current_seq
                                     })
                                 }
-                                BotEvent::TradeDecision { bot_id, bot_name, outcome, confidence, bet_size, reason, asset } => {
+                                BotEvent::TradeDecision { bot_id, bot_name, outcome, confidence, bet_size, reason, asset, risk_multiplier, kelly_bet, adjusted_confidence, consecutive_losses } => {
                                     serde_json::json!({
                                         "type": "trade_decision",
                                         "bot_id": bot_id,
@@ -364,6 +364,10 @@ pub async fn bot_events_stream(
                                         "bet_size": bet_size,
                                         "reason": reason,
                                         "asset": asset,
+                                        "risk_multiplier": risk_multiplier,
+                                        "kelly_bet": kelly_bet,
+                                        "adjusted_confidence": adjusted_confidence,
+                                        "consecutive_losses": consecutive_losses,
                                         "server_timestamp": chrono::Utc::now().timestamp_millis(),
                                         "seq": current_seq
                                     })

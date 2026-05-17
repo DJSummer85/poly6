@@ -7,6 +7,24 @@ import { getStrategyColor, strategyAbbr } from "@/lib/utils";
 import { useAppStore } from "@/store";
 import type { Bot as BotType } from "@/types";
 
+function RiskBadge({ riskMultiplier, adjustedConfidence }: { riskMultiplier: number; adjustedConfidence?: number }) {
+  const riskColor = riskMultiplier >= 0.8 ? "text-green-400" : riskMultiplier >= 0.5 ? "text-amber-400" : "text-red-400";
+  return (
+    <div className="flex items-center gap-2 shrink-0">
+      <div className="flex flex-col items-end leading-none">
+        <span className="text-[9px] text-zinc-500 uppercase font-bold tracking-tighter leading-none mb-0.5">Risk</span>
+        <span className={`text-[10px] font-bold ${riskColor}`}>×{riskMultiplier.toFixed(2)}</span>
+      </div>
+      {adjustedConfidence !== undefined && (
+        <div className="flex flex-col items-end leading-none">
+          <span className="text-[9px] text-zinc-500 uppercase font-bold tracking-tighter leading-none mb-0.5">Adj.Conf</span>
+          <span className="text-[10px] font-bold text-indigo-400">{(adjustedConfidence * 100).toFixed(0)}%</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function BotRow({
   bot,
   isSelected,
@@ -186,6 +204,14 @@ function BotRowInner({
                       <span className="text-[10px] font-bold text-indigo-400">{(data.confidence * 100).toFixed(0)}%</span>
                     </div>
                   </div>
+                )}
+
+                {/* Risk Metrics */}
+                {data.riskMultiplier !== undefined && (
+                  <RiskBadge
+                    riskMultiplier={data.riskMultiplier as number}
+                    adjustedConfidence={data.adjustedConfidence as number | undefined}
+                  />
                 )}
               </div>
             );

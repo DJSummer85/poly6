@@ -24,6 +24,7 @@ pub mod orders;
 pub mod positions;
 pub mod settings;
 pub mod sse;
+pub mod risk_snapshots;
 pub mod strategy_tests;
 pub mod telegram;
 pub mod user;
@@ -147,6 +148,7 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/strategy-tests/:id", get(strategy_tests::get_strategy_test))
         .route("/strategy-tests/:id/events", get(strategy_tests::get_strategy_test_events))
         .route("/strategy-tests/:id/performance", get(strategy_tests::get_strategy_test_performance))
+        .route("/risk/snapshots", get(risk_snapshots::get_risk_snapshots).post(risk_snapshots::save_risk_snapshot))
         .route("/validate-credentials", post(live_readiness::validate_credentials))
         .route("/settings/telegram/test", post(telegram::test_telegram))
         .route("/funding/info", get(funding::funding_info))

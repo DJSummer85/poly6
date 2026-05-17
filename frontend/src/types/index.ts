@@ -332,3 +332,13 @@ export interface BotRiskStatus {
   warnings: RiskWarning[];
   actions: string[];
 }
+
+// Risk Snapshot Types (persisted via API)
+export interface BotRiskSnapshot {
+  bot_id: number;
+  risk_multiplier: number;
+  adjusted_confidence: number;
+  kelly_bet: number;
+  consecutive_losses: number;
+  created_at: string;
+}

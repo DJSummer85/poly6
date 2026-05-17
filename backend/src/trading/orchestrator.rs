@@ -532,7 +532,7 @@ impl BotOrchestrator {
                     let effective_cost = price;
 
                     let polymarket_fee_rate = 0.02;
-                    let min_conf_threshold = 0.52;
+                    let min_conf_threshold = 0.47;
 
                     // === INTEGRATED CONFIDENCE + EV + KELLY PIPELINE ===
                     // Ported from polymarket-demo TypeScript: calculate7FactorConfidence(), calculateEV(), calculateBetSize()

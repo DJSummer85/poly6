@@ -54,7 +54,7 @@ impl RiskSettings {
             max_drawdown_percent: 30.0,
             min_confidence: 0.52,
             cooldown_after_loss_secs: 30.0,
-            max_trades_per_hour: 10,
+            max_trades_per_hour: 25,
             consecutive_loss_threshold: 5,
             circuit_breaker_enabled: true,
             portfolio_max_loss: 25.0,

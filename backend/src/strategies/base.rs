@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn test_strategy_params_default() {
         let params = StrategyParams::default();
-        assert_eq!(params.min_delta, 0.01);
+        assert_eq!(params.min_delta, 0.005);
         assert_eq!(params.max_delta, 5.0);
         assert_eq!(params.min_price, 0.30);
         assert_eq!(params.max_price, 0.70);

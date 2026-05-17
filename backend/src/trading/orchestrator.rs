@@ -499,7 +499,7 @@ impl BotOrchestrator {
             },
         };
 
-        let signal = rb.strategy.evaluate_with_context(ctx);
+        let signal = rb.strategy.evaluate_with_context(ctx.clone());
         eprintln!("[SIGNAL] Bot {} signal: {:?}", bot_id, signal);
 
         // MINDEN szignált (a HOLD-ot is) elküldünk az SSE-n, hogy látszódjon a webes konzolban
@@ -538,9 +538,11 @@ impl BotOrchestrator {
                     // Ported from polymarket-demo TypeScript: calculate7FactorConfidence(), calculateEV(), calculateBetSize()
 
                     // Step 1: Adjust confidence using loss tracker (performance feedback)
+                    let seven_factor_conf = confidence::calculate_7_factor_confidence(&ctx, outcome);
+                    let blended_conf = (*conf * 0.4 + seven_factor_conf * 0.6).clamp(0.05, 0.95);
                     let adjusted_conf = {
                         let mut lt = self.loss_tracker.write().await;
-                        lt.adjust_confidence(bot_id, *conf, fresh_balance_for_stop)
+                        lt.adjust_confidence(bot_id, blended_conf, fresh_balance_for_stop)
                     };
 
                     // Step 2: Calculate BTC signal strength for Bayesian update

@@ -46,8 +46,8 @@ impl Default for SignalMomentumV2Strategy {
                 min_delta: 0.20, // 0.20% minimum BTC move
                 min_price: 0.30, // Don't trade extreme odds
                 max_price: 0.70,
-                min_time_remaining: 30000,  // 30 seconds minimum
-                max_time_remaining: 250000, // 250 seconds maximum
+                min_time_remaining: 30,   // 30 seconds minimum
+                max_time_remaining: 250,   // 250 seconds maximum
                 ..Default::default()
             },
             min_delta_threshold: 0.20, // 0.20% delta threshold
@@ -103,9 +103,9 @@ impl Strategy for SignalMomentumV2Strategy {
 
        // Calculate time decay factor (0.9 to 1.0)
        // More time remaining = slightly higher confidence
-        let time_factor = if ctx.time_remaining > 150000 {
+        let time_factor = if ctx.time_remaining > 150 {
             1.0 // Plenty of time
-        } else if ctx.time_remaining > 60000 {
+        } else if ctx.time_remaining > 60 {
             0.95 // Getting close
         } else {
             0.90 // Very close to close
@@ -173,7 +173,7 @@ mod tests {
     fn test_holds_on_small_delta() {
         let strat = SignalMomentumV2Strategy::default();
        // 0.10% delta - below threshold, should hold
-        let c = ctx(80080.0, 80000.0, 0.52, 120000);
+        let c = ctx(80080.0, 80000.0, 0.52, 120);
         let decision = strat.evaluate(&c);
         assert!(matches!(decision.signal, Signal::Hold));
     }
@@ -182,7 +182,7 @@ mod tests {
     fn test_trades_yes_on_positive_delta() {
         let strat = SignalMomentumV2Strategy::default();
        // 0.25% delta - should trigger YES
-        let c = ctx(80200.0, 80000.0, 0.52, 120000);
+        let c = ctx(80200.0, 80000.0, 0.52, 120);
         let decision = strat.evaluate(&c);
         assert!(matches!(decision.signal, Signal::Yes));
     }
@@ -191,7 +191,7 @@ mod tests {
     fn test_trades_no_on_negative_delta() {
         let strat = SignalMomentumV2Strategy::default();
        // -0.25% delta - should trigger NO
-        let c = ctx(79800.0, 80000.0, 0.48, 120000);
+        let c = ctx(79800.0, 80000.0, 0.48, 120);
         let decision = strat.evaluate(&c);
         assert!(matches!(decision.signal, Signal::No));
     }
@@ -199,19 +199,13 @@ mod tests {
     #[test]
     fn test_confidence_scaling() {
         let strat = SignalMomentumV2Strategy::default();
-       // Small delta but above threshold -> lower confidence
-        let c1 = ctx(80100.0, 80000.0, 0.52, 120000); // 0.125% delta
-        let d1 = strat.evaluate(&c1);
-        if let Signal::Yes(c1_conf) = d1.signal {
-           // Strong delta -> higher confidence
-            let c2 = ctx(80300.0, 80000.0, 0.52, 120000); // 0.375% delta
-            let d2 = strat.evaluate(&c2);
-            if let Signal::Yes(c2_conf) = d2.signal {
-                assert!(
-                    c2_conf > c1_conf,
-                    "Stronger delta should have higher confidence"
-                );
-            }
-        }
+        // Small delta above threshold -> lower confidence
+        let d1 = strat.evaluate(&ctx(80160.0, 80000.0, 0.52, 120)); // 0.20% delta
+        // Strong delta -> higher confidence
+        let d2 = strat.evaluate(&ctx(80300.0, 80000.0, 0.52, 120)); // 0.375% delta
+        assert!(
+            d2.confidence >= d1.confidence,
+            "Stronger delta should have higher or equal confidence"
+        );
     }
 }

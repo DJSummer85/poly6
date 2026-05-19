@@ -32,8 +32,8 @@ impl Default for PatientWaiterStrategy {
                 min_delta: 0.12,        // Moderate threshold
                 min_price: 0.45,        // Only near 50% odds (45-55%)
                 max_price: 0.55,
-                min_time_remaining: 30000,  // Need at least 30 seconds
-                max_time_remaining: 290000,
+                min_time_remaining: 30,   // Need at least 30 seconds
+                max_time_remaining: 290,
                 ..Default::default()
             },
             odds_tolerance: 0.05,  // Within 5% of 50c
@@ -129,7 +129,7 @@ mod tests {
     fn test_holds_when_odds_not_sweet() {
         let strat = PatientWaiterStrategy::default();
         // 0.2% BTC move but odds at 70% - should hold
-        let ctx = patient_ctx(80160.0, 80000.0, 0.70, 120000);
+        let ctx = patient_ctx(80160.0, 80000.0, 0.70, 120);
         let decision = strat.evaluate(&ctx);
         assert!(matches!(decision.signal, Signal::Hold));
     }
@@ -138,7 +138,7 @@ mod tests {
     fn test_trades_in_sweet_spot() {
         let strat = PatientWaiterStrategy::default();
         // 0.2% BTC move and odds at 52% (near 50%)
-        let ctx = patient_ctx(80160.0, 80000.0, 0.52, 120000);
+        let ctx = patient_ctx(80160.0, 80000.0, 0.52, 120);
         let decision = strat.evaluate(&ctx);
         assert!(matches!(decision.signal, Signal::Yes));
     }
@@ -147,7 +147,7 @@ mod tests {
     fn test_holds_on_insufficient_move() {
         let strat = PatientWaiterStrategy::default();
         // Near 50% odds but only 0.05% BTC move
-        let ctx = patient_ctx(80040.0, 80000.0, 0.51, 120000);
+        let ctx = patient_ctx(80040.0, 80000.0, 0.51, 120);
         let decision = strat.evaluate(&ctx);
         assert!(matches!(decision.signal, Signal::Hold));
     }

@@ -28,8 +28,8 @@ impl Default for StrictMomentumStrategy {
                 min_delta: 0.15,     // MUCH higher threshold - only strong moves
                 min_price: 0.35,     // Don't trade extreme odds (safer)
                 max_price: 0.65,
-                min_time_remaining: 20000,  // Don't trade in last 20 seconds
-                max_time_remaining: 280000,
+                min_time_remaining: 20,   // Don't trade in last 20 seconds
+                max_time_remaining: 280,
                 ..Default::default()
             },
         }
@@ -121,7 +121,7 @@ mod tests {
     fn test_holds_on_small_move() {
         let strat = StrictMomentumStrategy::default();
         // Only 0.05% move - below 0.15% threshold
-        let ctx = strict_ctx(80040.0, 80000.0, 0.50, 120000);
+        let ctx = strict_ctx(80040.0, 80000.0, 0.50, 120);
         let decision = strat.evaluate(&ctx);
         assert!(matches!(decision.signal, Signal::Hold));
     }
@@ -130,7 +130,7 @@ mod tests {
     fn test_trades_on_strong_up() {
         let strat = StrictMomentumStrategy::default();
         // 0.2% move - above threshold
-        let ctx = strict_ctx(80160.0, 80000.0, 0.50, 120000);
+        let ctx = strict_ctx(80160.0, 80000.0, 0.50, 120);
         let decision = strat.evaluate(&ctx);
         assert!(matches!(decision.signal, Signal::Yes));
     }
@@ -139,7 +139,7 @@ mod tests {
     fn test_trades_on_strong_down() {
         let strat = StrictMomentumStrategy::default();
         // -0.2% move
-        let ctx = strict_ctx(79840.0, 80000.0, 0.50, 120000);
+        let ctx = strict_ctx(79840.0, 80000.0, 0.50, 120);
         let decision = strat.evaluate(&ctx);
         assert!(matches!(decision.signal, Signal::No));
     }
@@ -148,7 +148,7 @@ mod tests {
     fn test_rejects_extreme_odds() {
         let strat = StrictMomentumStrategy::default();
         // 0.2% move but extreme odds (80%) - should hold
-        let ctx = strict_ctx(80160.0, 80000.0, 0.80, 120000);
+        let ctx = strict_ctx(80160.0, 80000.0, 0.80, 120);
         let decision = strat.evaluate(&ctx);
         assert!(matches!(decision.signal, Signal::Hold));
     }

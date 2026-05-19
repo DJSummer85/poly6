@@ -145,9 +145,9 @@ impl BotLossTrackerManager {
         let mut multiplier = 1.0;
 
         match tracker.consecutive_losses {
-            1 => multiplier = 0.7,
-            2 => multiplier = 0.5,
-            3..=99 => multiplier = 0.3,
+            1 => multiplier = 0.85,
+            2 => multiplier = 0.65,
+            3..=99 => multiplier = 0.4,
             _ => {}
         }
 

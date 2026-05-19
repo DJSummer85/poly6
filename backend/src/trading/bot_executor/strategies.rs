@@ -91,8 +91,8 @@ pub struct StrategyContext {
 /// Strategy executor - evaluates BTC price and generates trading signals
 #[derive(Debug, Clone)]
 pub struct StrategyExecutor {
-    strategy_type: String,
-    params: StrategyParams,
+    pub strategy_type: String,
+    pub params: StrategyParams,
 }
 
 /// FIX: min_delta properly calibrated for 30-second window

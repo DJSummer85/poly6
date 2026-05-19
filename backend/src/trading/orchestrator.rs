@@ -499,7 +499,25 @@ impl BotOrchestrator {
             },
         };
 
-        let signal = rb.strategy.evaluate_with_context(ctx.clone());
+        // Dynamically adjust min_delta based on the market asset being scanned
+        let mut strategy = rb.strategy.clone();
+        let asset_lower = market.asset.to_lowercase();
+        match asset_lower.as_str() {
+            "btc" => strategy.params.min_delta = 0.0006, // ~0.06% (volt: 0.3%) - érzékeny korai trend-belépés
+            "eth" => strategy.params.min_delta = 0.0010, // ~0.10% (volt: 0.5%)
+            "sol" => strategy.params.min_delta = 0.0018, // ~0.18% (volt: 0.8%)
+            "xrp" => strategy.params.min_delta = 0.0012, // ~0.12% (volt: 0.6%)
+            _ => strategy.params.min_delta = 0.0010,
+        }
+        tracing::debug!(
+            "Bot {} ({}) scanning {}; overriding min_delta to {:.4}",
+            bot_id,
+            rb.bot_name,
+            market.asset,
+            strategy.params.min_delta
+        );
+
+        let signal = strategy.evaluate_with_context(ctx.clone());
         eprintln!("[SIGNAL] Bot {} signal: {:?}", bot_id, signal);
 
         // MINDEN szignált (a HOLD-ot is) elküldünk az SSE-n, hogy látszódjon a webes konzolban
@@ -532,7 +550,7 @@ impl BotOrchestrator {
                     let effective_cost = price;
 
                     let polymarket_fee_rate = 0.02;
-                    let min_conf_threshold = 0.47;
+                    let min_conf_threshold = 0.44;
 
                     // === INTEGRATED CONFIDENCE + EV + KELLY PIPELINE ===
                     // Ported from polymarket-demo TypeScript: calculate7FactorConfidence(), calculateEV(), calculateBetSize()

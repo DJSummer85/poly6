@@ -8,7 +8,7 @@
 
 use super::base::{
     check_price_limits, check_time_remaining, calculate_delta, calculate_fair_prob,
-    Signal, Strategy, StrategyContext, StrategyDecision, StrategyParams,
+    has_sufficient_edge, Signal, Strategy, StrategyContext, StrategyDecision, StrategyParams,
 };
 
 pub struct EdgeHunterStrategy {
@@ -29,8 +29,8 @@ impl Default for EdgeHunterStrategy {
                 min_delta: 0.05,      // Need significant BTC move
                 min_price: 0.35,      // Don't trade extreme odds
                 max_price: 0.65,
-                min_time_remaining: 15000,
-                max_time_remaining: 270000,
+                min_time_remaining: 15,
+                max_time_remaining: 270,
                 ..Default::default()
             },
             min_edge: 0.03,          // Need 3% edge minimum
@@ -86,31 +86,31 @@ impl Strategy for EdgeHunterStrategy {
         // Calculate edge: positive means we think it's more likely than market
         let edge = our_prob - market_prob;
 
-        // Only trade if we have sufficient edge
-        if edge > self.min_edge {
-            // Our probability > market - market is undervaluing our outcome
-            let confidence = (0.55 + edge * 3.0).min(0.82);
-            return StrategyDecision::trade(
-                Signal::Yes,
-                confidence,
-                &format!(
-                    "EDGE +{:.1}%: our {:.1}% > market {:.1}% (BTC {:.2}%)",
-                    edge * 100.0, our_prob * 100.0, market_prob * 100.0, delta_pct
-                ),
-            );
-        }
-
-        if edge < -self.min_edge {
-            // Market thinks this is MORE likely than we do - bet against
-            let confidence = (0.55 + (-edge) * 3.0).min(0.82);
-            return StrategyDecision::trade(
-                Signal::No,
-                confidence,
-                &format!(
-                    "EDGE +{:.1}%: our {:.1}% < market {:.1}% (BTC {:.2}%)",
-                    (-edge) * 100.0, our_prob * 100.0, market_prob * 100.0, delta_pct
-                ),
-            );
+        // Only trade if we have sufficient edge (our_prob vs market_prob)
+        if has_sufficient_edge(our_prob, market_prob, self.min_edge) {
+            if edge > 0.0 {
+                // Our probability > market - market is undervaluing YES
+                let confidence = (0.55 + edge * 3.0).min(0.82);
+                return StrategyDecision::trade(
+                    Signal::Yes,
+                    confidence,
+                    &format!(
+                        "EDGE +{:.1}%: our {:.1}% > market {:.1}% (BTC {:.2}%)",
+                        edge * 100.0, our_prob * 100.0, market_prob * 100.0, delta_pct
+                    ),
+                );
+            } else {
+                // Market thinks this is MORE likely than we do - bet against
+                let confidence = (0.55 + (-edge) * 3.0).min(0.82);
+                return StrategyDecision::trade(
+                    Signal::No,
+                    confidence,
+                    &format!(
+                        "EDGE +{:.1}%: our {:.1}% < market {:.1}% (BTC {:.2}%)",
+                        (-edge) * 100.0, our_prob * 100.0, market_prob * 100.0, delta_pct
+                    ),
+                );
+            }
         }
 
         StrategyDecision::hold(&format!(
@@ -138,9 +138,8 @@ mod tests {
     #[test]
     fn test_positive_edge_trades_yes() {
         let strat = EdgeHunterStrategy::default();
-        // BTC up 0.1%, PM at 52%, our calc says 54% -> edge = +2%
-        // Need 3% edge minimum, so this won't trade
-        let ctx = edge_ctx(80080.0, 80000.0, 0.52, 120000);
+        // BTC up 0.1%, PM at 52%, our calc says ~54% -> edge ~2% < 3% min
+        let ctx = edge_ctx(80080.0, 80000.0, 0.52, 120);
         let decision = strat.evaluate(&ctx);
         assert!(matches!(decision.signal, Signal::Hold));
     }
@@ -148,8 +147,8 @@ mod tests {
     #[test]
     fn test_strong_positive_edge_trades() {
         let strat = EdgeHunterStrategy::default();
-        // BTC up 0.2%, PM at 50%, our calc says 58% -> edge = +8%
-        let ctx = edge_ctx(80160.0, 80000.0, 0.50, 120000);
+        // BTC up 0.2%, PM at 50%, our calc says ~58% -> edge ~8% >= 3% min
+        let ctx = edge_ctx(80160.0, 80000.0, 0.50, 120);
         let decision = strat.evaluate(&ctx);
         assert!(matches!(decision.signal, Signal::Yes));
     }

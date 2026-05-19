@@ -58,9 +58,10 @@ impl Strategy for FairValueStrategy {
         // Calculate fair probability from BTC delta
         let btc_price = ctx.btc_price.unwrap_or(0.0);
         let window_open = ctx.btc_window_open.unwrap_or(btc_price);
-        let delta_pct = ((btc_price - window_open) / window_open) * 100.0;
+        // Calculate as ratio (not percentage) - calculate_fair_prob expects 0.002, not 0.2
+        let delta_ratio = if window_open > 0.0 { (btc_price - window_open) / window_open } else { 0.0 };
 
-        let fair_prob = calculate_fair_prob(delta_pct);
+        let fair_prob = calculate_fair_prob(delta_ratio);
         let deviation = (fair_prob - pm_price).abs();
 
         // Trade if deviation is significant

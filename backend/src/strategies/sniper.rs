@@ -24,7 +24,7 @@ impl Default for SniperStrategy {
                 min_delta: 0.06,
                 min_price: 0.35,
                 max_price: 0.65,
-                min_time_remaining: 60000, // At least 1 minute
+                min_time_remaining: 60, // At least 1 minute
                 ..Default::default()
             },
         }

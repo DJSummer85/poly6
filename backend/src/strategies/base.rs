@@ -68,10 +68,10 @@ pub struct StrategyParams {
 impl Default for StrategyParams {
     fn default() -> Self {
         Self {
-            min_delta: 0.005,       // 1%
+            min_delta: 0.02,        // 2% - reasonable threshold, not too noisy
             max_delta: 5.0,
-            min_price: 0.10,
-            max_price: 0.90,
+            min_price: 0.25,        // Don't trade extreme odds
+            max_price: 0.75,
             min_time_remaining: 5,
             max_time_remaining: 300,
             min_odds: None,
@@ -106,9 +106,19 @@ pub fn calculate_delta(current_price: f64, window_open: f64) -> f64 {
     ((current_price - window_open) / window_open) * 100.0
 }
 
-/// Helper: Calculate fair probability from delta using tanh
+/// Helper: Calculate fair probability from delta using tanh calibration
+/// delta_pct should be a ratio (e.g. 0.002 for +0.2%), NOT a percentage
+/// Returns a value in [0.05, 0.95] — a true probability
 pub fn calculate_fair_prob(delta_pct: f64) -> f64 {
     0.5 + (delta_pct / 0.05).tanh() * 0.45
+}
+
+/// Helper: Check if we have sufficient edge over the market price
+/// our_prob: our calculated fair probability
+/// market_prob: Polymarket implied probability (YES price)
+/// min_edge: minimum required edge (e.g. 0.07 for 7%)
+pub fn has_sufficient_edge(our_prob: f64, market_prob: f64, min_edge: f64) -> bool {
+    (our_prob - market_prob).abs() >= min_edge
 }
 
 /// Helper: Check if price is within acceptable range
@@ -205,33 +215,42 @@ mod tests {
 
     #[test]
     fn test_check_time_remaining() {
-        let params = StrategyParams::default();
-        assert!(check_time_remaining(120000, &params));
-        assert!(!check_time_remaining(10000, &params));
-        assert!(!check_time_remaining(500000, &params));
+        let params = StrategyParams::default(); // min=5s, max=300s
+        assert!(check_time_remaining(120, &params));   // 2 minutes - valid
+        assert!(!check_time_remaining(3, &params));   // too short
+        assert!(!check_time_remaining(400, &params)); // too long
     }
 
     #[test]
     fn test_check_delta() {
-        let params = StrategyParams::default(); // min_delta = 0.01
+        let params = StrategyParams::default(); // min_delta = 0.02
 
-        assert!(check_delta(0.02, &params, None)); // |0.02| > 0.01
-        assert!(!check_delta(0.005, &params, None)); // |0.005| < 0.01
+        assert!(check_delta(0.05, &params, None)); // |0.05| > 0.02 ✓
+        assert!(!check_delta(0.01, &params, None)); // |0.01| < 0.02 ✗
 
-        assert!(check_delta(0.02, &params, Some("up"))); // 0.02 > 0.01
-        assert!(!check_delta(0.005, &params, Some("up"))); // 0.005 < 0.01
+        assert!(check_delta(0.05, &params, Some("up"))); // 0.05 > 0.02 ✓
+        assert!(!check_delta(0.01, &params, Some("up"))); // 0.01 < 0.02 ✗
 
-        assert!(check_delta(-0.02, &params, Some("down"))); // -0.02 < -0.01
-        assert!(!check_delta(-0.005, &params, Some("down"))); // -0.005 > -0.01
+        assert!(check_delta(-0.05, &params, Some("down"))); // -0.05 < -0.02 ✓
+        assert!(!check_delta(-0.01, &params, Some("down"))); // -0.01 > -0.02 ✗
     }
 
     #[test]
     fn test_strategy_params_default() {
         let params = StrategyParams::default();
-        assert_eq!(params.min_delta, 0.005);
+        assert_eq!(params.min_delta, 0.02);
         assert_eq!(params.max_delta, 5.0);
-        assert_eq!(params.min_price, 0.30);
-        assert_eq!(params.max_price, 0.70);
+        assert_eq!(params.min_price, 0.25);
+        assert_eq!(params.max_price, 0.75);
         assert!(params.min_odds.is_none());
+    }
+
+    #[test]
+    fn test_has_sufficient_edge() {
+        // Edge = |our_prob - market_prob|
+        assert!(has_sufficient_edge(0.60, 0.50, 0.07));  // 10% edge >= 7%
+        assert!(!has_sufficient_edge(0.55, 0.50, 0.07)); // 5% edge < 7%
+        assert!(has_sufficient_edge(0.40, 0.50, 0.07));  // negative edge, abs = 10% >= 7%
+        assert!(!has_sufficient_edge(0.50, 0.50, 0.07)); // no edge
     }
 }

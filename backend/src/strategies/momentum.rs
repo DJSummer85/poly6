@@ -117,7 +117,7 @@ mod tests {
             btc_price_change: None,
             btc_window_open: Some(80000.0),
             polymarket_price: Some(0.50),
-            time_remaining: 120000,
+            time_remaining: 120, // 2 minutes in seconds
             order_book_spread: None,
         }
     }

@@ -3,6 +3,7 @@
 import { motion } from "framer-motion";
 import {
   Bot,
+  Brain,
   DollarSign,
   Loader2,
   Play,
@@ -36,6 +37,27 @@ export function BotDetailCard({
   const { data: portfolio } = usePortfolio(bot.id);
   const color = getStrategyColor(bot.strategy_type);
   const riskMetrics = useAppStore((s) => s.botRiskMetrics[bot.id]);
+  const thoughts = useAppStore((s) => s.thoughts);
+  const activities = useAppStore((s) => s.botActivities[bot.id]) || [];
+
+  const latestThought = thoughts.slice().reverse().find((t) => t.botId === bot.id.toString());
+  const lastDecision = [...activities].reverse().find((a) => a.type === "trade_decision");
+
+  const currentThoughtText = latestThought
+    ? latestThought.text
+    : lastDecision
+      ? (lastDecision.data as any).reason
+      : null;
+
+  const thoughtColor = latestThought
+    ? latestThought.type === "success"
+      ? "text-emerald-400"
+      : latestThought.type === "warn"
+        ? "text-amber-400"
+        : latestThought.type === "error"
+          ? "text-red-400"
+          : "text-zinc-300"
+    : "text-zinc-300";
 
   return (
     <motion.div
@@ -82,6 +104,17 @@ export function BotDetailCard({
                   style={{ background: `${color}20`, color }}
                 >
                   {bot.strategy_type}
+                </span>
+                <span 
+                  className={`rounded px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest border ${
+                    bot.asset === 'BTC' ? 'bg-orange-500/10 text-orange-400 border-orange-500/30' :
+                    bot.asset === 'ETH' ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' :
+                    bot.asset === 'SOL' ? 'bg-purple-500/10 text-purple-400 border-purple-500/30' :
+                    bot.asset === 'XRP' ? 'bg-teal-500/10 text-teal-400 border-teal-500/30' :
+                    'bg-zinc-500/10 text-zinc-400 border-zinc-500/30'
+                  }`}
+                >
+                  {bot.asset || 'AUTO'}
                 </span>
                 {bot.use_kelly && (
                   <span className="rounded px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-400">
@@ -180,6 +213,28 @@ export function BotDetailCard({
             <span className="text-[10px] text-zinc-500">Még nincsenek trading adatok</span>
           </div>
         )}
+
+        {/* Current Thought / Mit gondol éppen */}
+        <div className="mt-3 rounded-lg border border-white/5 bg-white/[0.01] p-2.5">
+          <div className="flex items-center gap-1.5 mb-1">
+            <Brain className="h-3 w-3 text-indigo-400" />
+            <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-400">
+              Mit gondol éppen
+            </span>
+            {latestThought && (
+              <span className="text-[8px] text-zinc-600 font-mono ml-auto">
+                {new Date(latestThought.timestamp).toLocaleTimeString("hu-HU", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  second: "2-digit",
+                })}
+              </span>
+            )}
+          </div>
+          <p className={`text-xs italic leading-snug ${thoughtColor}`}>
+            {currentThoughtText ? `"${currentThoughtText}"` : '"Várakozás elemzésre..."'}
+          </p>
+        </div>
 
         {/* Risk Metrics Panel */}
         {riskMetrics && (

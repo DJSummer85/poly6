@@ -519,6 +519,14 @@ pub async fn seed_default_bots(pool: &sqlx::SqlitePool, user_id: i64) -> Result<
         ("Trend Pullback", "trend_pullback"),
         ("Price Reversion", "price_reversion"),
         ("Sniper Value", "sniper_value"),
+        ("Edge Hunter", "edge_hunter"),
+        ("Extreme Edge", "extreme_edge"),
+        ("YES/NO Arb", "yes_no_arb"),
+        ("Oracle Lag V2", "oracle_lag_v2"),
+        ("Low Vol Edge", "low_volatility_edge"),
+        ("Strict Momentum", "strict_momentum"),
+        ("Patient Waiter", "patient_waiter"),
+        ("Momentum V2", "momentum_v2"),
     ];
 
     for (name, strategy) in default_bots {
@@ -559,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_seed_default_bots_creates_15_bots() {
+    async fn test_seed_default_bots_creates_16_bots() {
         let pool = create_test_pool().await;
 
         // Insert a test user
@@ -578,7 +586,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(count, 15);
+        assert_eq!(count, 23);
     }
 
     #[tokio::test]
@@ -601,7 +609,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(count, 15); // Still 15, not 30
+        assert_eq!(count, 23); // Still 23, not 46
     }
 
     #[tokio::test]
@@ -625,7 +633,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(paper_count, 15);
+        assert_eq!(paper_count, 23);
     }
 }
 

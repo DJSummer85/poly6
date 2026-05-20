@@ -694,12 +694,38 @@ function BotCard({ bot, isInPos, onAction, onEdit, onDelete, isLoading }: any) {
  
   const runElapsed = useElapsedTimer(bot.runSince)
   const posElapsed = useElapsedTimer(bot.posSince)
+
+  const thoughts = useAppStore(state => state.thoughts);
+  const activities = useAppStore(state => state.botActivities[Number(bot.id)]) || [];
+
+  const latestThought = thoughts.slice().reverse().find((t) => t.botId === bot.id.toString());
+  const lastDecision = [...activities].reverse().find((a) => a.type === "trade_decision");
+
+  const currentThoughtText = latestThought
+    ? latestThought.text
+    : lastDecision
+      ? (lastDecision.data as any).reason
+      : null;
+
+  const thoughtColor = latestThought
+    ? latestThought.type === "success"
+      ? "#34d399"
+      : latestThought.type === "warn"
+        ? "#fbbf24"
+        : latestThought.type === "error"
+          ? "#f87171"
+          : "#94a3b8"
+    : "#94a3b8";
  
+  const [showChart, setShowChart] = useState(false);
+  const [showParams, setShowParams] = useState(false);
+
   return (
     <motion.div layout style={{
       background: '#13131f', border: isInPos ? '1.5px solid #22c55e' : '1px solid #252535',
       borderRadius: '12px', padding: '10px', display: 'flex', flexDirection: 'column', gap: '8px',
-      backgroundColor: isInPos ? 'rgba(34, 197, 94, 0.04)' : '#13131f', position: 'relative'
+      backgroundColor: isInPos ? 'rgba(34, 197, 94, 0.04)' : '#13131f', position: 'relative',
+      minWidth: '0px'
     }}>
       {/* Trading Mode Badge */}
       <div style={{
@@ -734,23 +760,45 @@ function BotCard({ bot, isInPos, onAction, onEdit, onDelete, isLoading }: any) {
         <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: bot.status === 'running' ? '#22c55e' : '#4b5563' }} />
       </div>
  
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h3 style={{ fontSize: '11px', fontWeight: 800, margin: '12px 0 0', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }} title={bot.name}>{bot.name}</h3>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', marginTop: '12px' }}>
+        <div style={{
+          fontSize: '7px',
+          fontWeight: 900,
+          padding: '1px 5px',
+          borderRadius: '4px',
+          background: bot.asset === 'BTC' ? 'rgba(247, 147, 26, 0.15)' :
+                      bot.asset === 'ETH' ? 'rgba(98, 126, 234, 0.15)' :
+                      bot.asset === 'SOL' ? 'rgba(20, 241, 149, 0.15)' :
+                      bot.asset === 'XRP' ? 'rgba(35, 122, 228, 0.15)' : 'rgba(107, 114, 128, 0.15)',
+          color: bot.asset === 'BTC' ? '#f7931a' :
+                 bot.asset === 'ETH' ? '#627eea' :
+                 bot.asset === 'SOL' ? '#14f195' :
+                 bot.asset === 'XRP' ? '#237ae4' : '#9ca3af',
+          border: bot.asset === 'BTC' ? '1px solid rgba(247, 147, 26, 0.3)' :
+                  bot.asset === 'ETH' ? '1px solid rgba(98, 126, 234, 0.3)' :
+                  bot.asset === 'SOL' ? '1px solid rgba(20, 241, 149, 0.3)' :
+                  bot.asset === 'XRP' ? '1px solid rgba(35, 122, 228, 0.3)' : '1px solid rgba(107, 114, 128, 0.3)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+          marginBottom: '2px'
+        }}>
+          {bot.asset || 'AUTO'}
+        </div>
+        <h3 style={{ fontSize: '11px', fontWeight: 800, margin: '0', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', textAlign: 'center', width: '100%' }} title={bot.name}>{bot.name}</h3>
       </div>
-      <span style={{ fontSize: '7px', fontWeight: 900, color: strategyColor, background: `${strategyColor}15`, padding: '1px 4px', borderRadius: '3px', alignSelf: 'flex-start' }}>{bot.strategy_type.toUpperCase()}</span>
  
       {/* ---- SZÁMLÁLÓK BLOKK ---- */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px' }}>
         <div style={{
           background: bot.status === 'running' ? 'rgba(99,102,241,0.08)' : '#0d0d1a',
           border: `1px solid ${bot.status === 'running' ? '#3b3bff30' : '#1e1e30'}`,
-          borderRadius: '6px', padding: '4px 6px'
+          borderRadius: '6px', padding: '2px 4px'
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '3px', marginBottom: '1px' }}>
             <Clock size={8} color={bot.status === 'running' ? '#818cf8' : '#4b5563'} />
             <span style={{ fontSize: '6px', fontWeight: 800, color: bot.status === 'running' ? '#818cf8' : '#4b5563', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Fut</span>
           </div>
-          <span style={{ fontSize: '9px', fontWeight: 700, color: bot.status === 'running' ? '#a5b4fc' : '#4b5563', fontVariantNumeric: 'tabular-nums' }}>
+          <span style={{ fontSize: '7px', fontWeight: 700, color: bot.status === 'running' ? '#a5b4fc' : '#4b5563', fontVariantNumeric: 'tabular-nums' }}>
             {bot.status === 'running' ? runElapsed : '—'}
           </span>
         </div>
@@ -758,13 +806,13 @@ function BotCard({ bot, isInPos, onAction, onEdit, onDelete, isLoading }: any) {
         <div style={{
           background: isInPos ? 'rgba(34,197,94,0.08)' : '#0d0d1a',
           border: `1px solid ${isInPos ? '#22c55e30' : '#1e1e30'}`,
-          borderRadius: '6px', padding: '4px 6px'
+          borderRadius: '6px', padding: '2px 4px'
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '3px', marginBottom: '1px' }}>
             <Zap size={8} color={isInPos ? '#22c55e' : '#4b5563'} />
             <span style={{ fontSize: '6px', fontWeight: 800, color: isInPos ? '#22c55e' : '#4b5563', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Poz.</span>
           </div>
-          <span style={{ fontSize: '9px', fontWeight: 700, color: isInPos ? '#4ade80' : '#4b5563', fontVariantNumeric: 'tabular-nums' }}>
+          <span style={{ fontSize: '7px', fontWeight: 700, color: isInPos ? '#4ade80' : '#4b5563', fontVariantNumeric: 'tabular-nums' }}>
             {isInPos ? posElapsed : '—'}
           </span>
         </div>
@@ -789,19 +837,6 @@ function BotCard({ bot, isInPos, onAction, onEdit, onDelete, isLoading }: any) {
         );
       })()}
  
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '3px' }}>
-        <div style={{ background: '#1a1a2e', padding: '3px', borderRadius: '5px', textAlign: 'center' }}><p style={{ fontSize: '5px', color: '#4b5563', margin: 0 }}>TÉT</p><p style={{ fontSize: '9px', fontWeight: 700, margin: 0 }}>${bot.bet_size}</p></div>
-        <div style={{ background: '#1a1a2e', padding: '3px', borderRadius: '5px', textAlign: 'center' }}><p style={{ fontSize: '5px', color: '#4b5563', margin: 0 }}>SL</p><p style={{ fontSize: '9px', fontWeight: 700, margin: 0 }}>-10%</p></div>
-        <div style={{ background: '#1a1a2e', padding: '3px', borderRadius: '5px', textAlign: 'center' }}><p style={{ fontSize: '5px', color: '#4b5563', margin: 0 }}>TP</p><p style={{ fontSize: '9px', fontWeight: 700, margin: 0 }}>+20%</p></div>
-      </div>
- 
-      <div style={{ marginTop: '4px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '7px', color: '#4b5563', marginBottom: '2px', fontWeight: 800, textTransform: 'uppercase' }}><span>Teljesítmény</span></div>
-        <div style={{ height: '30px', background: '#080812', borderRadius: '8px', border: '1px solid #1e1e30', overflow: 'hidden', position: 'relative' }}>
-          <Sparkline data={bot.pnl_history || []} height={30} />
-        </div>
-      </div>
- 
       <div style={{ marginTop: '4px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '7px', color: '#4b5563', marginBottom: '2px', fontWeight: 800, textTransform: 'uppercase' }}>
           <span>UTÓBBI KÖTÉSEK</span>
@@ -818,6 +853,66 @@ function BotCard({ bot, isInPos, onAction, onEdit, onDelete, isLoading }: any) {
           ))}
           {(!bot.pnl_history || bot.pnl_history.length === 0) && <p style={{ fontSize: '7px', color: '#333', textAlign: 'center', marginTop: '8px' }}>Várakozás...</p>}
         </div>
+      </div>
+
+      {/* Gondolat / Thought row */}
+      <div style={{ marginTop: '4px', background: '#080812', border: '1px solid #1e1e30', borderRadius: '8px', padding: '5px 8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
+          <Brain size={10} color="#6366f1" />
+          <span style={{ fontSize: '7px', color: '#4b5563', fontWeight: 800, textTransform: 'uppercase' }}>Aktuális gondolat</span>
+          {latestThought && (
+            <span style={{ fontSize: '6px', color: '#334155', marginLeft: 'auto', fontFamily: 'monospace' }}>
+              {new Date(latestThought.timestamp).toLocaleTimeString("hu-HU", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+            </span>
+          )}
+        </div>
+        <p style={{ fontSize: '9px', fontStyle: 'italic', margin: 0, color: thoughtColor, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', lineHeight: '1.2' }} title={currentThoughtText || "Várakozás..."}>
+          {currentThoughtText ? `"${currentThoughtText}"` : '"Várakozás elemzésre..."'}
+        </p>
+      </div>
+
+      {/* Bot Paraméterek (Tét/SL/TP) */}
+      <div style={{ marginTop: '4px' }}>
+        <button
+          type="button"
+          onClick={() => setShowParams(!showParams)}
+          style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%',
+            fontSize: '7px', color: '#4b5563', fontWeight: 800,
+            textTransform: 'uppercase', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0
+          }}
+        >
+          <span>Paraméterek</span>
+          <ChevronDown size={8} style={{ transform: showParams ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', color: '#4b5563' }} />
+        </button>
+        {showParams && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '3px', marginTop: '4px' }}>
+            <div style={{ background: '#1a1a2e', padding: '3px', borderRadius: '5px', textAlign: 'center' }}><p style={{ fontSize: '5px', color: '#4b5563', margin: 0 }}>TÉT</p><p style={{ fontSize: '9px', fontWeight: 700, margin: 0 }}>${bot.bet_size}</p></div>
+            <div style={{ background: '#1a1a2e', padding: '3px', borderRadius: '5px', textAlign: 'center' }}><p style={{ fontSize: '5px', color: '#4b5563', margin: 0 }}>SL</p><p style={{ fontSize: '9px', fontWeight: 700, margin: 0 }}>-10%</p></div>
+            <div style={{ background: '#1a1a2e', padding: '3px', borderRadius: '5px', textAlign: 'center' }}><p style={{ fontSize: '5px', color: '#4b5563', margin: 0 }}>TP</p><p style={{ fontSize: '9px', fontWeight: 700, margin: 0 }}>+20%</p></div>
+          </div>
+        )}
+      </div>
+ 
+      {/* Teljesítmény diagram */}
+      <div style={{ marginTop: '4px' }}>
+        <button
+          type="button"
+          onClick={() => setShowChart(!showChart)}
+          style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%',
+            fontSize: '7px', color: '#4b5563', fontWeight: 800,
+            textTransform: 'uppercase', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0
+          }}
+        >
+          <span>Diagram</span>
+          <ChevronDown size={8} style={{ transform: showChart ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', color: '#4b5563' }} />
+        </button>
+        {showChart && (
+          <div style={{ height: '30px', background: '#080812', borderRadius: '8px', border: '1px solid #1e1e30', overflow: 'hidden', position: 'relative', marginTop: '4px' }}>
+            <Sparkline data={bot.pnl_history || []} height={30} />
+          </div>
+        )}
       </div>
  
       <div style={{ height: '2px', background: '#1e1e30', borderRadius: '1px', overflow: 'hidden' }}><div style={{ height: '100%', width: `${bot.portfolio?.win_rate || 0}%`, background: '#22c55e' }} /></div>

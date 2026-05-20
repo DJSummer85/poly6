@@ -37,6 +37,7 @@ export interface Bot {
 export type StrategyType =
   | "window_delta"
   | "fair_value"
+  | "edge_hunter"
   | "last_seconds_scalp"
   | "momentum"
   | "binance_signal"
@@ -53,6 +54,13 @@ export type StrategyType =
   | "mean_reversion"
   | "trend"
   | "volatility"
+  | "extreme_edge"
+  | "yes_no_arb"
+  | "oracle_lag_v2"
+  | "low_volatility_edge"
+  | "strict_momentum"
+  | "patient_waiter"
+  | "momentum_v2"
   | "random";
 
 export const STRATEGY_LABELS: Record<
@@ -68,6 +76,11 @@ export const STRATEGY_LABELS: Record<
     name: "Fair Value Arb",
     category: "Arbitrage",
     description: "Piac félreárazást keres",
+  },
+  edge_hunter: {
+    name: "Edge Hunter",
+    category: "Arbitrage",
+    description: "Valószínűségi előny a piaccal szemben",
   },
   last_seconds_scalp: {
     name: "T-10 Sniper",
@@ -117,7 +130,7 @@ export const STRATEGY_LABELS: Record<
   binance_velocity: {
     name: "Binance Velocity",
     category: "Momentum",
-    description: "BTC sebesség alapú",
+    description: "BTC sebesség és gyorsulás alapú",
   },
   sniper_value: {
     name: "Sniper Value",
@@ -138,6 +151,41 @@ export const STRATEGY_LABELS: Record<
     name: "Mean Reversion",
     category: "Mean Rev",
     description: "Extrém elmozdulás után visszatérés",
+  },
+  extreme_edge: {
+    name: "Extreme Edge",
+    category: "Arbitrage",
+    description: "Ellentétes fogadás extrém oddsoknál (>65c / <35c)",
+  },
+  yes_no_arb: {
+    name: "YES/NO Arb",
+    category: "Arbitrage",
+    description: "Kétoldali arbitrázs, ha az összeg < 97c",
+  },
+  oracle_lag_v2: {
+    name: "Oracle Lag V2",
+    category: "Momentum",
+    description: "Oracle késés finomhangolt küszöbökkel",
+  },
+  low_volatility_edge: {
+    name: "Low Vol Edge",
+    category: "Mean Rev",
+    description: "Kifejezetten alacsony BTC volatilitásra szabva",
+  },
+  strict_momentum: {
+    name: "Strict Momentum",
+    category: "Momentum",
+    description: "Csak nagyon erős BTC mozgásra lép be (>0.15%)",
+  },
+  patient_waiter: {
+    name: "Patient Waiter",
+    category: "Other",
+    description: "Kivárja a tökéletes belépőt 50c környékén",
+  },
+  momentum_v2: {
+    name: "Momentum V2",
+    category: "Momentum",
+    description: "Továbbfejlesztett momentum kockázatkezeléssel",
   },
   trend: { name: "Multi-level Trend", category: "Trend", description: "Trend követés" },
   volatility: { name: "Volatility", category: "Momentum", description: "Volatilitás kitörés" },

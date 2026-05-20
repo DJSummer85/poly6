@@ -54,6 +54,14 @@ pub async fn list_strategies() -> Json<StrategiesResponse> {
             StrategyInfo { id: "binance_velocity".into(), name: "Binance Velocity".into(), description: "BTC velocity + acceleration".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
             StrategyInfo { id: "fair_value".into(), name: "Fair Value".into(), description: "Delta-based fair probability".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
             StrategyInfo { id: "oracle_lag".into(), name: "Oracle Lag".into(), description: "CLOB vs spot delta".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
+            StrategyInfo { id: "edge_hunter".into(), name: "Edge Hunter".into(), description: "Probability edge vs market".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
+            StrategyInfo { id: "extreme_edge".into(), name: "Extreme Edge".into(), description: "Counter-bet at extreme odds (>65c / <35c)".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
+            StrategyInfo { id: "yes_no_arb".into(), name: "YES/NO Arb".into(), description: "Guaranteed profit when combined price < 97c".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
+            StrategyInfo { id: "oracle_lag_v2".into(), name: "Oracle Lag V2".into(), description: "Oracle lag with fine-tuned thresholds".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
+            StrategyInfo { id: "low_volatility_edge".into(), name: "Low Vol Edge".into(), description: "Custom tuned for low volatility BTC environments".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
+            StrategyInfo { id: "strict_momentum".into(), name: "Strict Momentum".into(), description: "Only trades on strong BTC moves (>0.15%)".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
+            StrategyInfo { id: "patient_waiter".into(), name: "Patient Waiter".into(), description: "Waits for perfect 50c setups".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
+            StrategyInfo { id: "momentum_v2".into(), name: "Momentum V2".into(), description: "Advanced momentum with risk calibration".into(), params: vec!["min_delta".into(), "min_price".into(), "max_price".into()] },
         ],
     })
 }

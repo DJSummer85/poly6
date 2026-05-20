@@ -91,12 +91,11 @@ pub fn calculate_7_factor_confidence(ctx: &StrategyContext, side: &str) -> f64 {
 
     // Odds extremity: if the market strongly disagrees with us, reduce confidence
     //   e.g. side=YES, but YES price is 0.30 → market disagrees → penalty
-    let odds_direction = if side == "YES" {
-        1.0 - ctx.yes_price // higher YES price = market agrees with YES
+    let odds_disagreement = if side == "YES" {
+        1.0 - ctx.yes_price
     } else {
-        ctx.yes_price // higher YES price = market disagrees with NO
+        1.0 - ctx.no_price
     };
-    let odds_disagreement = 1.0 - odds_direction; // 0 = market agrees, 1 = market disagrees
     confidence -= (odds_disagreement * 0.08).min(0.08); // Max -8% for disagreement
 
     // Volatility penalty

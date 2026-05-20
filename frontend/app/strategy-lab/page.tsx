@@ -104,6 +104,14 @@ const STRATEGY_COLORS: Record<string, string> = {
   fair_value: "#14b8a6",
   oracle_lag: "#a855f7",
   window_delta: "#3b82f6",
+  edge_hunter: "#f43f5e",
+  extreme_edge: "#ef4444",
+  yes_no_arb: "#10b981",
+  oracle_lag_v2: "#a855f7",
+  low_volatility_edge: "#06b6d4",
+  strict_momentum: "#8b5cf6",
+  patient_waiter: "#f59e0b",
+  momentum_v2: "#8b5cf6",
 };
 
 export default function StrategyLabPage() {

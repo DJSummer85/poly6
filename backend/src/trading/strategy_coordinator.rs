@@ -68,6 +68,14 @@ impl Default for CoordinatorConfig {
         // Standalone
         compatible.insert("odds_swing".to_string(), vec![]);
         compatible.insert("bayesian_ev".to_string(), vec![]);
+        compatible.insert("edge_hunter".to_string(), vec![]);
+        compatible.insert("extreme_edge".to_string(), vec![]);
+        compatible.insert("yes_no_arb".to_string(), vec![]);
+        compatible.insert("oracle_lag_v2".to_string(), vec!["oracle_lag".into(), "binance_signal".into()]);
+        compatible.insert("low_volatility_edge".to_string(), vec![]);
+        compatible.insert("strict_momentum".to_string(), vec!["momentum".into()]);
+        compatible.insert("patient_waiter".to_string(), vec![]);
+        compatible.insert("momentum_v2".to_string(), vec!["momentum".into()]);
 
         Self {
             max_outcome_exposure: 0.4, // 40% max exposure

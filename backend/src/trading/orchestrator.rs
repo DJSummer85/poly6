@@ -327,47 +327,33 @@ impl BotOrchestrator {
         {
             let now = Instant::now();
             rb.btc_price_history.push((asset_price, now));
-            let cutoff = now - Duration::from_secs(60);
+            // Keep only last 30 seconds of history for velocity calc
+            let cutoff = now - Duration::from_secs(30);
             rb.btc_price_history.retain(|(_, t)| *t > cutoff);
-            
+
             if rb.btc_price_history.len() >= 2 {
-                // FIX: Use a fixed 30-second window for change calculation
-                let window_duration = Duration::from_secs(30);
-                let target_time = now - window_duration;
-                
-                let oldest_in_window = rb.btc_price_history.iter()
-                    .find(|(_, t)| *t >= target_time)
-                    .or_else(|| rb.btc_price_history.first())
-                    .map(|(p, _)| *p)
-                    .unwrap_or(asset_price);
-                    
-                asset_change = Some((asset_price - oldest_in_window) / oldest_in_window);
-                
-                let first_instant = rb.btc_price_history.first().map(|(_, t)| *t).unwrap();
-                let last_instant = rb.btc_price_history.last().map(|(_, t)| *t).unwrap();
-                let duration_secs = (last_instant - first_instant).as_secs_f64().max(1.0);
-                
+                // Change from oldest in window
+                let oldest = rb.btc_price_history.first().map(|(p, _)| *p).unwrap_or(asset_price);
+                asset_change = Some((asset_price - oldest) / oldest);
+
+                // Velocity: % change per second over window (duration_secs evaluates to 1.0 based on reference repo)
+                let duration_secs = rb.btc_price_history.last().map(|(_, t)| t.elapsed().as_secs_f64()).unwrap_or(1.0).max(1.0);
                 asset_velocity = Some(asset_change.unwrap() / duration_secs);
-                
+
+                // Acceleration: change in velocity (simplified)
                 if rb.btc_price_history.len() >= 3 {
-                    let mid_idx = rb.btc_price_history.len() / 2;
-                    let mid_price = rb.btc_price_history[mid_idx].0;
-                    let mid_instant = rb.btc_price_history[mid_idx].1;
-                    
-                    let first_to_mid_secs = (mid_instant - first_instant).as_secs_f64().max(1.0);
-                    let mid_to_last_secs = (last_instant - mid_instant).as_secs_f64().max(1.0);
-                    
-                    let oldest_price = rb.btc_price_history.first().map(|(p, _)| *p).unwrap();
-                    let velocity_first_half = (mid_price - oldest_price) / oldest_price / first_to_mid_secs;
-                    let velocity_second_half = (asset_price - mid_price) / mid_price / mid_to_last_secs;
-                    
-                    asset_acceleration = Some((velocity_second_half - velocity_first_half) / (duration_secs / 2.0).max(1.0));
+                    let oldest2 = rb.btc_price_history[rb.btc_price_history.len()/2].0;
+                    let mid_change = (oldest2 - oldest) / oldest;
+                    let mid_duration = duration_secs / 2.0;
+                    let prev_velocity = mid_change / mid_duration.max(1.0);
+                    asset_acceleration = Some((asset_velocity.unwrap() - prev_velocity) / mid_duration.max(1.0));
                 } else {
                     asset_acceleration = Some(0.0);
                 }
             } else {
+                // Fallback to last_btc_price (velocity = change / 5sec interval assumption)
                 asset_change = rb.last_btc_price.map(|last| (asset_price - last) / last);
-                asset_velocity = asset_change;
+                asset_velocity = asset_change.map(|c| c / 5.0);
                 asset_acceleration = Some(0.0);
             }
         }
@@ -386,6 +372,10 @@ impl BotOrchestrator {
         let market_changed = rb.last_market_slug.as_ref() != Some(&market_slug);
         
         if market_changed || market_ended {
+            if market_ended {
+                let mut coord = self.coordinator.write().await;
+                coord.reset_market(&market_slug);
+            }
             if let Some(ref bet) = rb.pending_bet {
                 // Elszámoláshoz a fogadáskori eszköz árát kérjük le
                 let current_settle_price = crate::api::market::get_asset_price(&bet.asset).await.unwrap_or(asset_price);
@@ -412,7 +402,7 @@ impl BotOrchestrator {
                     moved_same_direction
                 };
                 
-                let polymarket_fee_rate = 0.02;
+                let polymarket_fee_rate = 0.00;
                 let potential_return = bet.bet_size / bet.entry_price.max(0.01);
                 let settlement_credit = if won {
                     potential_return * (1.0 - polymarket_fee_rate)
@@ -460,6 +450,10 @@ impl BotOrchestrator {
             }
             
             if market_changed {
+                if let Some(ref old_slug) = rb.last_market_slug {
+                    let mut coord = self.coordinator.write().await;
+                    coord.reset_market(old_slug);
+                }
                 rb.btc_window_open = Some(asset_price);
                 rb.last_market_slug = Some(market_slug.clone());
                 tracing::info!("[MARKET] Bot {} new market: {} (time_remaining={}s)", bot_id, market_slug, market.time_remaining);
@@ -549,7 +543,7 @@ impl BotOrchestrator {
                     let price = if outcome == "YES" { (market.yes_price * slippage_sim).min(0.99) } else { (market.no_price * slippage_sim).min(0.99) };
                     let effective_cost = price;
 
-                    let polymarket_fee_rate = 0.02;
+                    let polymarket_fee_rate = 0.00;
                     let min_conf_threshold = 0.44;
 
                     // === INTEGRATED CONFIDENCE + EV + KELLY PIPELINE ===
@@ -611,20 +605,50 @@ impl BotOrchestrator {
                     // Prevent momentum entry in last 60s (too risky)
                     let time_is_okay = market.time_remaining > 60 || rb.strategy_type == "last_seconds_scalp";
 
-                    let (can_trade, block_reason) = if !expected_value_positive {
-                        (false, Some(format!("Low EV/Conf (prob {:.2} < threshold {:.2}, EV={:.4})", bayes_prob, min_conf_threshold, expected_value)))
+                    let mut block_reason = None;
+                    let mut can_trade = false;
+                    let mut coordinator_final_bet = final_bet;
+
+                    if !expected_value_positive {
+                        block_reason = Some(format!("Low EV/Conf (prob {:.2} < threshold {:.2}, EV={:.4})", bayes_prob, min_conf_threshold, expected_value));
                     } else if !time_is_okay {
-                        (false, Some(format!("Too late to trade ({}s remaining)", market.time_remaining)))
+                        block_reason = Some(format!("Too late to trade ({}s remaining)", market.time_remaining));
                     } else {
                         let mut rm = self.risk_manager.write().await;
-                        rm.can_open_position(
+                        let (rm_allowed, rm_reason) = rm.can_open_position(
                             bot_id,
                             final_bet,
                             bayes_prob,
                             fresh_balance_for_stop,
                             portfolio.initial_balance,
-                        )
-                    };
+                        );
+                        if !rm_allowed {
+                            block_reason = rm_reason;
+                        } else {
+                            // Check StrategyCoordinator
+                            let mut coord = self.coordinator.write().await;
+                            let coord_res = coord.register_decision(
+                                &market.condition_id,
+                                bot_id,
+                                &rb.bot_name,
+                                &rb.strategy_type,
+                                outcome,
+                                bayes_prob,
+                                final_bet,
+                                fresh_balance_for_stop,
+                            );
+                            if coord_res.allowed {
+                                can_trade = true;
+                                if let Some(adj) = coord_res.adjusted_bet_size {
+                                    coordinator_final_bet = adj;
+                                }
+                            } else {
+                                block_reason = Some(format!("Coordinator blocked: {}", coord_res.reason));
+                            }
+                        }
+                    }
+
+                    let final_bet = coordinator_final_bet;
 
                     if !can_trade {
                         let reason = block_reason.unwrap_or_else(|| "Risk blocked".into());
@@ -660,15 +684,68 @@ impl BotOrchestrator {
                             consecutive_losses,
                         }).ok();
 
+                        let mut order_placed = false;
+                        let mut order_id = "paper_trade".to_string();
+
                         if bot.trading_mode == "live" {
                             if let Some(ref cache) = credential_cache {
                                 let c = cache.read().await;
                                 if let Some(creds) = c.get(&user_id) {
-                                    let _ = Self::place_order(&market, outcome, final_bet, creds).await;
+                                    match Self::place_order(&market, outcome, final_bet, creds).await {
+                                        Ok(id) => {
+                                            order_id = id;
+                                            order_placed = true;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Live order failed: {}", e);
+                                            // Cancel decision from coordinator since it was not placed
+                                            let mut coord = self.coordinator.write().await;
+                                            coord.cancel_decision(&market.condition_id, bot_id);
+                                        }
+                                    }
+                                } else {
+                                    tracing::error!("No cached credentials found for user {}", user_id);
+                                    let mut coord = self.coordinator.write().await;
+                                    coord.cancel_decision(&market.condition_id, bot_id);
                                 }
+                            } else {
+                                tracing::error!("Credential cache not initialized");
+                                let mut coord = self.coordinator.write().await;
+                                coord.cancel_decision(&market.condition_id, bot_id);
                             }
                         } else {
-                            let d_id = queries::log_trade_decision(&self.db, bot_id, rb.session_id, user_id, &market_slug, &market.condition_id, outcome, &bot.strategy_type, bayes_prob, Some(asset_price), asset_change, Some(market.yes_price), Some(market.no_price), Some(market.time_remaining), "paper trade").await.unwrap_or(0);
+                            // Paper trade is always placed
+                            order_placed = true;
+                        }
+
+                        if order_placed {
+                            // Confirm execution to coordinator
+                            {
+                                let mut coord = self.coordinator.write().await;
+                                coord.confirm_execution(&market.condition_id, bot_id, outcome, final_bet);
+                            }
+
+                            let decision_reason = if bot.trading_mode == "live" { "live trade" } else { "paper trade" };
+                            let d_id = queries::log_trade_decision(
+                                &self.db,
+                                bot_id,
+                                rb.session_id,
+                                user_id,
+                                &market_slug,
+                                &market.condition_id,
+                                outcome,
+                                &bot.strategy_type,
+                                bayes_prob,
+                                Some(asset_price),
+                                asset_change,
+                                Some(market.yes_price),
+                                Some(market.no_price),
+                                Some(market.time_remaining),
+                                decision_reason
+                            ).await.unwrap_or(0);
+
+                            // Mark decision as executed in DB with order_id
+                            queries::mark_decision_executed(&self.db, d_id, &order_id).await.ok();
 
                             let fresh_balance = queries::get_portfolio(&self.db, bot_id, user_id)
                                 .await
@@ -678,8 +755,9 @@ impl BotOrchestrator {
                                 .unwrap_or(portfolio.balance);
 
                             queries::update_portfolio_balance(&self.db, bot_id, fresh_balance - final_bet).await.ok();
-                            eprintln!("[BET] Bot {}: {} ${:.2} @ {:.2} | balance: {:.2} → {:.2} (risk_mult={:.2}, conf={:.2})",
-                                bot_id, outcome, final_bet, price, fresh_balance, fresh_balance - final_bet, risk_mult, bayes_prob);
+                            
+                            eprintln!("[BET] Bot {}: {} ${:.2} @ {:.2} | balance: {:.2} → {:.2} (risk_mult={:.2}, conf={:.2}, mode={})",
+                                bot_id, outcome, final_bet, price, fresh_balance, fresh_balance - final_bet, risk_mult, bayes_prob, bot.trading_mode);
 
                             // Notify loss tracker that a trade was sent (pending settlement)
                             {
@@ -699,10 +777,11 @@ impl BotOrchestrator {
                             });
                             rb.last_trade_time = Some(Instant::now());
 
-                            // Telegram értesítés trade indításról
+                            // Telegram notification
                             if let Some(ref telegram) = self.telegram_service {
                                 let msg = format!(
-                                    "🚀 <b>Bot Trade Opened</b>\n\nBot: <b>{}</b>\nIrány: <b>{}</b>\nTét: <b>${:.2}</b>\nÁr: ${:.2} ({})\nConf: {:.1}% | RiskMult: {:.2}x",
+                                    "🚀 <b>Bot Trade Opened ({})</b>\n\nBot: <b>{}</b>\nIrány: <b>{}</b>\nTét: <b>${:.2}</b>\nÁr: ${:.2} ({})\nConf: {:.1}% | RiskMult: {:.2}x",
+                                    if bot.trading_mode == "live" { "LIVE" } else { "DEMO" },
                                     bot.name, outcome, final_bet, asset_price, market.asset, bayes_prob * 100.0, risk_mult
                                 );
                                 let t = telegram.clone();
@@ -711,7 +790,13 @@ impl BotOrchestrator {
                                 });
                             }
 
-                            self.event_sender.send(BotEvent::PositionUpdate { bot_id, side: outcome.to_string(), size: final_bet, price, unrealized_pnl: 0.0 }).ok();
+                            self.event_sender.send(BotEvent::PositionUpdate {
+                                bot_id,
+                                side: outcome.to_string(),
+                                size: final_bet,
+                                price,
+                                unrealized_pnl: 0.0
+                            }).ok();
                         }
                     }
                 }

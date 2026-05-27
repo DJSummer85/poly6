@@ -183,6 +183,11 @@ impl BotOrchestrator {
             last_trade_time: None,
             strategy_type: bot.strategy_type.clone(),
         });
+        // Fix: tell RiskManager the actual starting balance so portfolio loss limits are correct
+        {
+            let mut rm = self.risk_manager.write().await;
+            rm.set_portfolio_start_balance(current_balance);
+        }
         self.event_sender.send(BotEvent::SessionStarted { bot_id: bot.id, session_id, bot_name: bot.name.clone() }).ok();
         Ok(session_id)
     }
@@ -201,6 +206,12 @@ impl BotOrchestrator {
             last_trade_time: None,
             strategy_type: bot.strategy_type.clone(),
         });
+        drop(running);
+        // Fix: tell RiskManager the actual starting balance so portfolio loss limits are correct
+        {
+            let mut rm = self.risk_manager.write().await;
+            rm.set_portfolio_start_balance(initial_balance);
+        }
         self.event_sender.send(BotEvent::SessionStarted { bot_id: bot.id, session_id, bot_name: bot.name.clone() }).ok();
         tracing::info!("Bot {} started (session {}), trading_mode={}", bot.id, session_id, bot.trading_mode);
         Ok(session_id)
@@ -294,10 +305,71 @@ impl BotOrchestrator {
         }
 
         let all_markets = fetch_active_markets("5").await;
-        // Kriptovaluta kiválasztás a bot beállítása alapján
-        let market = if all_markets.is_empty() {
+
+        // === EARLY SETTLEMENT: process pending bets even when no markets available ===
+        if all_markets.is_empty() {
+            if let Some(ref bet) = rb.pending_bet {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+
+                if now > bet.market_end_time {
+                    tracing::info!("[SETTLE] Bot {}: early settlement triggered (no active markets)", bot_id);
+                    let current_settle_price = crate::api::market::get_asset_price(&bet.asset).await.unwrap_or(0.0);
+                    if current_settle_price > 0.0 {
+                        let diff = (current_settle_price - bet.start_price) / bet.start_price;
+                        let won = if let Some(ptb) = bet.price_to_beat {
+                            let is_won = if bet.side == "YES" { current_settle_price >= ptb } else { current_settle_price < ptb };
+                            tracing::info!("[SETTLE-EMPTY] Bot {}: {} Target={:.2} Final={:.2} Won={}", bot_id, bet.side, ptb, current_settle_price, is_won);
+                            is_won
+                        } else {
+                            let moved_up = current_settle_price > bet.start_price;
+                            let moved_same_direction = (bet.side == "YES" && moved_up) || (bet.side == "NO" && !moved_up);
+                            tracing::warn!("[SETTLE-EMPTY] Missing price_to_beat for bot {}. Using direction: start={:.2} → final={:.2}, same={}",
+                                bot_id, bet.start_price, current_settle_price, moved_same_direction);
+                            moved_same_direction
+                        };
+
+                        let polymarket_fee_rate = 0.00;
+                        let potential_return = bet.bet_size / bet.entry_price.max(0.01);
+                        let settlement_credit = if won { potential_return * (1.0 - polymarket_fee_rate) } else { 0.0 };
+                        let pnl_for_stats = settlement_credit - bet.bet_size;
+
+                        queries::record_paper_settlement(&self.db, bot_id, bet.decision_id, won, settlement_credit, pnl_for_stats).await.ok();
+
+                        self.event_sender.send(BotEvent::TradeResult { bot_id, won, pnl: pnl_for_stats }).ok();
+                        eprintln!("[SETTLE-EMPTY] Bot {}: {} won={} credit={:.4} pnl={:.4} price_diff={:.6}",
+                            bot_id, bet.side, won, settlement_credit, pnl_for_stats, diff);
+
+                        {
+                            let mut rm = self.risk_manager.write().await;
+                            rm.record_trade_result(bot_id, won);
+                        }
+
+                        {
+                            let mut lt = self.loss_tracker.write().await;
+                            lt.update_settlement(bot_id, won, pnl_for_stats, fresh_balance_for_stop);
+                        }
+
+                        rb.pending_bet = None;
+                    }
+                }
+            }
+
+            // Update running bot state before returning
+            {
+                let mut running = self.running_bots.write().await;
+                if let Some(existing) = running.get_mut(&bot_id) {
+                    existing.pending_bet = rb.pending_bet;
+                }
+            }
             return Ok(());
-        } else {
+        }
+
+        // Kriptovaluta kiválasztás a bot beállítása alapján
+        let market = {
+            let _target_asset = bot.market_id.to_uppercase();
             let target_asset = bot.market_id.to_uppercase();
             if target_asset != "AUTO" {
                 // Kifejezetten ezt az eszközt kérték (pl. BTC, ETH)
@@ -437,13 +509,13 @@ impl BotOrchestrator {
                     rm.record_trade_result(bot_id, won);
                 }
 
-                // FIX: Update the loss tracker so that adjust_confidence() and get_risk_multiplier()
-                // have up-to-date consecutive loss/win data (was previously dead code!)
+                // Update the loss tracker so that adjust_confidence() and get_risk_multiplier()
+                // have up-to-date consecutive loss/win data
                 {
                     let mut lt = self.loss_tracker.write().await;
-                    // New balance = pre-settlement balance + PnL
-                    let new_balance = fresh_balance_for_stop + pnl_for_stats;
-                    lt.update_settlement(bot_id, won, pnl_for_stats, new_balance);
+                    // fresh_balance_for_stop already reflects the balance AFTER record_paper_settlement was called
+                    // DO NOT add pnl_for_stats again (would double-count PnL in peak_balance/drawdown tracking)
+                    lt.update_settlement(bot_id, won, pnl_for_stats, fresh_balance_for_stop);
                 }
 
                 rb.pending_bet = None;
@@ -544,7 +616,7 @@ impl BotOrchestrator {
                     let effective_cost = price;
 
                     let polymarket_fee_rate = 0.00;
-                    let min_conf_threshold = 0.44;
+                    let min_conf_threshold = 0.42;
 
                     // === INTEGRATED CONFIDENCE + EV + KELLY PIPELINE ===
                     // Ported from polymarket-demo TypeScript: calculate7FactorConfidence(), calculateEV(), calculateBetSize()

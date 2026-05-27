@@ -93,6 +93,9 @@ impl BotLossTrackerManager {
     /// Get risk multiplier based on bot performance
     /// Returns 0.0 if bot should stop trading, or a multiplier (0.25, 0.5, 0.75, 1.0)
     pub fn get_risk_multiplier(&mut self, bot_id: i64, current_balance: f64) -> f64 {
+        // Időalapú recovery: inaktivitás után csökkentjük a consecutive_losses-t
+        self.apply_time_recovery(bot_id);
+
         let _tracker = self.get_or_create(bot_id, current_balance);
 
         let tracker = self.trackers.get(&bot_id).unwrap();
@@ -105,24 +108,24 @@ impl BotLossTrackerManager {
             );
         }
 
-        // 5+ consecutive losses -> very aggressive reduction
+        // 5+ consecutive losses -> 30% size (volt: 15%)
         if tracker.consecutive_losses >= 5 {
-            return 0.15;
-        }
-
-        // 3-4 consecutive losses -> 30% of normal size
-        if tracker.consecutive_losses >= 3 {
             return 0.30;
         }
 
-        // 2 consecutive losses -> 40% of normal size
-        if tracker.consecutive_losses >= 2 {
-            return 0.40;
+        // 3-4 consecutive losses -> 50% size (volt: 30%)
+        if tracker.consecutive_losses >= 3 {
+            return 0.50;
         }
 
-        // 1 consecutive loss -> 50% of normal size
+        // 2 consecutive losses -> 60% size (volt: 40%)
+        if tracker.consecutive_losses >= 2 {
+            return 0.60;
+        }
+
+        // 1 consecutive loss -> 75% size (volt: 50%)
         if tracker.consecutive_losses >= 1 {
-            return 0.5;
+            return 0.75;
         }
 
         // Drawdown-based reduction
@@ -139,21 +142,24 @@ impl BotLossTrackerManager {
 
     /// Adjust confidence based on recent performance
     pub fn adjust_confidence(&mut self, bot_id: i64, base_confidence: f64, current_balance: f64) -> f64 {
+        // Időalapú recovery: inaktivitás után csökkentjük a consecutive_losses-t
+        self.apply_time_recovery(bot_id);
+
         let _tracker = self.get_or_create(bot_id, current_balance);
         let tracker = self.trackers.get(&bot_id).unwrap();
 
         let mut multiplier = 1.0;
 
         match tracker.consecutive_losses {
-            1 => multiplier = 0.85,
-            2 => multiplier = 0.65,
-            3..=99 => multiplier = 0.4,
+            1 => multiplier = 0.98,  // Egy loss után szinte nincs büntetés
+            2 => multiplier = 0.92,  // Két loss után enyhe csökkentés
+            3..=99 => multiplier = 0.75, // Három+ loss után is 75%-on tartjuk a conf-ot
             _ => {}
         }
 
-        // Additional penalty if overall losing streak
-        if tracker.total_wins >= 3 && tracker.total_losses > (tracker.total_wins as f64 * 1.5) as u32 {
-            multiplier *= 0.8;
+        // Additional penalty only if significantly losing overall
+        if tracker.total_wins >= 5 && tracker.total_losses > (tracker.total_wins as f64 * 2.0) as u32 {
+            multiplier *= 0.9;
         }
 
         (base_confidence * multiplier).max(0.0)
@@ -162,6 +168,39 @@ impl BotLossTrackerManager {
     /// Reset all trackers
     pub fn reset_all(&mut self) {
         self.trackers.clear();
+    }
+
+    /// Időalapú recovery: consecutive_losses csökkentése inaktivitás után
+    /// Ha 5+ perc eltelt újabb veszteség nélkül, 5 percenként 1-gyel csökken a számláló
+    fn apply_time_recovery(&mut self, bot_id: i64) {
+        let (consecutive, last_loss_time) = {
+            let tracker = self.trackers.get(&bot_id);
+            match tracker {
+                Some(t) => (t.consecutive_losses, t.last_loss_time),
+                None => return,
+            }
+        };
+
+        if consecutive == 0 || last_loss_time.is_none() {
+            return;
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        let minutes_since_loss = (now - last_loss_time.unwrap()) / 60;
+
+        if minutes_since_loss >= 5 {
+            let recovery = (minutes_since_loss / 5) as u32;
+            if let Some(tracker) = self.trackers.get_mut(&bot_id) {
+                let new_value = tracker.consecutive_losses.saturating_sub(recovery);
+                if new_value != tracker.consecutive_losses {
+                    tracing::info!(
+                        "[LossTracker] Bot {}: time-based recovery {}→{} ({}min inactive)",
+                        bot_id, tracker.consecutive_losses, new_value, minutes_since_loss
+                    );
+                    tracker.consecutive_losses = new_value;
+                }
+            }
+        }
     }
 
     /// Get tracker info for a bot

@@ -52,7 +52,7 @@ impl RiskSettings {
             max_daily_loss: 20.0,
             max_position_size: 50.0,  // Kelly számításból adódó tételek (~$7-15) ne legyenek blokkolva
             max_drawdown_percent: 30.0,
-            min_confidence: 0.52,
+            min_confidence: 0.52,  // volt: 0.52 → egyeztetjük az orchestrator EV-küszöbbel
             cooldown_after_loss_secs: 30.0,
             max_trades_per_hour: 25,
             consecutive_loss_threshold: 5,

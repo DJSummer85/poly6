@@ -40,7 +40,7 @@ cd backend && cargo test              # Rust tests
 ### Backend (Rust)
 - **API Layer** (`src/api/`): Axum handlers for auth, bots, orders, settings, SSE
 - **Trading Engine** (`src/trading/`): Polymarket client, bot executor, orchestrator
-- **Strategies** (`src/strategies/`): Momentum, Mean Reversion, Trend, Contrarian, etc.
+- **Strategies** (`src/trading/bot_executor/strategies.rs`): Momentum, Trend, Volatility, Sniper, Contrarian, Edge Hunter, Oracle Lag, etc.
 - **Database**: SQLite via sqlx, tables: users, bot_configs, bot_sessions, trades
 - **SSE** (`src/api/sse.rs`): Real-time Polymarket data at 300ms intervals
 

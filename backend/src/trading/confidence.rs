@@ -89,14 +89,15 @@ pub fn calculate_7_factor_confidence(ctx: &StrategyContext, side: &str) -> f64 {
     // Time remaining: more time → slightly higher confidence (max +5%)
     confidence += (time_ratio * 0.05).min(0.05);
 
-    // Odds extremity: if the market strongly disagrees with us, reduce confidence
+    // Odds extremity: if the market strongly disagrees with us, reduce confidence slightly
     //   e.g. side=YES, but YES price is 0.30 → market disagrees → penalty
+    //   Max -4% — enough to avoid trading into extreme odds, but not so punishing
     let odds_disagreement = if side == "YES" {
         1.0 - ctx.yes_price
     } else {
         1.0 - ctx.no_price
     };
-    confidence -= (odds_disagreement * 0.08).min(0.08); // Max -8% for disagreement
+    confidence -= (odds_disagreement * 0.04).min(0.04); // Max -4% for disagreement
 
     // Volatility penalty
     confidence -= vol_penalty;
@@ -231,19 +232,19 @@ pub fn calculate_half_kelly_bet(
 ///
 /// Returns a multiplier [0.0, 1.0] to apply to confidence:
 /// - 0 losses: 1.0 (no adjustment)
-/// - 1 loss:   0.80
-/// - 2 losses: 0.65
-/// - 3 losses: 0.50
-/// - 4 losses: 0.35
-/// - 5+ losses: 0.20 (strong penalty)
+/// - 1 loss:   0.95
+/// - 2 losses: 0.88
+/// - 3 losses: 0.78
+/// - 4 losses: 0.65
+/// - 5+ losses: 0.50 (moderate penalty — don't kill bot completely)
 pub fn confidence_decay_from_losses(consecutive_losses: u32) -> f64 {
     match consecutive_losses {
         0 => 1.0,
-        1 => 0.80,
-        2 => 0.65,
-        3 => 0.50,
-        4 => 0.35,
-        _ => 0.20,
+        1 => 0.95,
+        2 => 0.88,
+        3 => 0.78,
+        4 => 0.65,
+        _ => 0.50,
     }
 }
 

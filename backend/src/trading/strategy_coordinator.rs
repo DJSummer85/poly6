@@ -79,8 +79,8 @@ impl Default for CoordinatorConfig {
 
         Self {
             max_outcome_exposure: 0.4, // 40% max exposure
-            conflict_mode: "strict".to_string(),
-            max_bots_same_outcome: 2,
+            conflict_mode: "advisory".to_string(), // "strict" 15 botnál blokkolta a 3-15. botot
+            max_bots_same_outcome: 5, // volt: 2 → 15 bot mellé legalább 5 férjen el egy oldalon
             compatible_strategies: compatible,
         }
     }

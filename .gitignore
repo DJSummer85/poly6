@@ -48,3 +48,4 @@ logs/
 # Build artifacts
 *.tgz
 *.tsbuildinfo
+.aider*

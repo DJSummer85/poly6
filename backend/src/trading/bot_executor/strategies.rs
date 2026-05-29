@@ -162,7 +162,8 @@ impl StrategyExecutor {
             "sniper" => self.evaluate_sniper(ctx),
             "contrarian" => self.evaluate_contrarian(ctx),
             "mean_reversion" => self.evaluate_mean_reversion(ctx),
-            "binance_velocity" | "velocity" => self.evaluate_velocity(ctx),
+            "velocity" => self.evaluate_velocity(ctx),
+            "binance_velocity" => self.evaluate_binance_velocity(ctx),
             "fair_value" => self.evaluate_fair_value(ctx),
             "price_reversion" => self.evaluate_price_reversion(ctx),
             "trend_pullback" => self.evaluate_trend_pullback(ctx),
@@ -579,63 +580,102 @@ impl StrategyExecutor {
             return Signal::Hold("No BTC price".to_string());
         }
 
-        // Avoid high volatility periods (unpredictable)
-        // btc_volatility > 0.003 means >0.3% volatility
-        if btc_volatility > 0.003 {
-            return Signal::Hold("High volatility - market unpredictable".to_string());
+        // Avoid extreme volatility only (raised from 0.003 to 0.006 - 0.003 was blocking normal BTC)
+        if btc_volatility > 0.006 {
+            return Signal::Hold("Extreme volatility - market unpredictable".to_string());
         }
 
-        // Minimum velocity threshold: 0.001% per second (BTC typically moves ~0.0017%/sec)
-        // Lowered from 0.015% to allow trading during normal BTC volatility
-        let min_velocity: f64 = 0.00001;
-        let min_acceleration: f64 = 0.000008;
+        // Minimum velocity threshold
+        let min_velocity: f64 = 0.00002;
 
         if velocity.abs() < min_velocity {
             return Signal::Hold(format!("Velocity too low: {:.4}%/s (choppy)", velocity * 100.0));
         }
 
         let is_up = velocity > 0.0;
-        let is_accelerating = (is_up && acceleration > 0.0) || (!is_up && acceleration < 0.0);
 
-        // Need BOTH velocity AND acceleration above thresholds
-        if velocity.abs() < min_velocity || acceleration.abs() < min_acceleration {
-            return Signal::Hold("Signal too weak - need both velocity AND acceleration".to_string());
+        // Check price limits
+        let action = if is_up { "YES" } else { "NO" };
+        let target_price = if is_up { ctx.yes_price } else { ctx.no_price };
+
+        if target_price < self.params.min_price || target_price > self.params.max_price {
+            return Signal::Hold(format!("Price out of range: {:.0}c", target_price * 100.0));
         }
 
-        // Only trade if accelerating (momentum building)
-        if is_accelerating {
-            // Check price limits
-            let action = if is_up { "YES" } else { "NO" };
-            let target_price = if is_up { ctx.yes_price } else { ctx.no_price };
+        // Confidence: velocity strength + acceleration boost (positive if accelerating, small penalty if decelerating)
+        let vel_strength = (velocity.abs() * 800.0).min(0.25);
+        let acc_in_direction = if is_up { acceleration } else { -acceleration };
+        let acc_boost = (acc_in_direction * 800.0).clamp(-0.05, 0.15);
+        let base_confidence = 0.55_f64;
+        let confidence = (base_confidence + vel_strength + acc_boost).min(0.80);
 
-            if target_price < self.params.min_price || target_price > self.params.max_price {
-                return Signal::Hold(format!("Price out of range: {:.0}c", target_price * 100.0));
-            }
+        tracing::info!(
+            "Velocity: {} | vel={:.4}%/s acc={:.5}%/s² conf={:.2}",
+            action, velocity * 100.0, acceleration * 100.0, confidence
+        );
 
-            // Confidence calculation matching demo
-            let vel_strength = (velocity.abs() * 800.0).min(0.25);
-            let acc_boost = (acceleration.abs() * 800.0).min(0.15);
-            let base_confidence = 0.55_f64;
-            let confidence = (base_confidence + vel_strength + acc_boost).min(0.80);
-
-            tracing::info!(
-                "Binance Velocity: {} | vel={:.3}%/s acc={:.4}%/s² conf={:.2}",
-                action, velocity * 100.0, acceleration * 100.0, confidence
-            );
-
-            if is_up {
-                Signal::Yes(confidence)
-            } else {
-                Signal::No(confidence)
-            }
+        if is_up {
+            Signal::Yes(confidence)
         } else {
-            // Decelerating - momentum fading, skip
-            Signal::Hold(format!(
-                "Decelerating - momentum fading: vel={:.3}%/s acc={:.4}%/s²",
-                velocity * 100.0, acceleration * 100.0
-            ))
+            Signal::No(confidence)
         }
     }
+
+    fn evaluate_binance_velocity(&self, ctx: StrategyContext) -> Signal {
+    // Similar to evaluate_velocity but with stricter thresholds for Binance data
+    if ctx.time_remaining < 45 {
+        return Signal::Hold("Too close to closure".to_string());
+    }
+
+    let velocity = ctx.btc_velocity.unwrap_or(0.0);
+    let acceleration = ctx.btc_acceleration.unwrap_or(0.0);
+    let btc_volatility = ctx.btc_volatility.unwrap_or(0.0);
+
+    if ctx.btc_price == 0.0 {
+        return Signal::Hold("No BTC price".to_string());
+    }
+
+    // Avoid extreme volatility only (raised from 0.003 to 0.006)
+    if btc_volatility > 0.006 {
+        return Signal::Hold("Extreme volatility - market unpredictable".to_string());
+    }
+
+    // Stricter velocity threshold for Binance data
+    let min_velocity: f64 = 0.00003; // 0.003%/s
+
+    if velocity.abs() < min_velocity {
+        return Signal::Hold(format!("Velocity too low: {:.4}%/s (choppy)", velocity * 100.0));
+    }
+
+    let is_up = velocity > 0.0;
+
+    // Check price limits
+    let action = if is_up { "YES" } else { "NO" };
+    let target_price = if is_up { ctx.yes_price } else { ctx.no_price };
+
+    if target_price < self.params.min_price || target_price > self.params.max_price {
+        return Signal::Hold(format!("Price out of range: {:.0}c", target_price * 100.0));
+    }
+
+    // Confidence: velocity strength + acceleration boost (positive if accelerating, small penalty if decelerating)
+    let vel_strength = (velocity.abs() * 1000.0).min(0.30);
+    let acc_in_direction = if is_up { acceleration } else { -acceleration };
+    let acc_boost = (acc_in_direction * 1000.0).clamp(-0.05, 0.20);
+    let base_confidence = 0.60_f64;
+    let confidence = (base_confidence + vel_strength + acc_boost).min(0.85);
+
+    tracing::info!(
+        "Binance Velocity: {} | vel={:.4}%/s acc={:.5}%/s² conf={:.2}",
+        action, velocity * 100.0, acceleration * 100.0, confidence
+    );
+
+    if is_up {
+        Signal::Yes(confidence)
+    } else {
+        Signal::No(confidence)
+    }
+}
+
 
 
     fn evaluate_fair_value(&self, ctx: StrategyContext) -> Signal {

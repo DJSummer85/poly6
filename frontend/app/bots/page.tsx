@@ -143,6 +143,7 @@ export default function BotsPage() {
   // UI State
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | BotStatus>('all')
+  const [statusFilterMode, setStatusFilterMode] = useState<'all' | 'running' | 'not-running'>('all')
   const [sortKey, setSortKey] = useState<SortKey>('pnl')
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
   const [quickFilter, setQuickFilter] = useState<'none' | 'best3' | 'worst3'>('none')
@@ -293,7 +294,14 @@ export default function BotsPage() {
   const filteredBots = useMemo(() => {
     let list = [...bots]
     if (search) list = list.filter(b => b.name.toLowerCase().includes(search.toLowerCase()))
-    if (statusFilter !== 'all') list = list.filter(b => b.status === statusFilter)
+    // Status filter based on running/not-running mode
+    if (statusFilterMode === 'running') {
+      list = list.filter(b => b.status === 'running')
+    } else if (statusFilterMode === 'not-running') {
+      list = list.filter(b => b.status !== 'running')
+    } else if (statusFilter !== 'all') {
+      list = list.filter(b => b.status === statusFilter)
+    }
 
     list.sort((a, b) => {
       let valA = 0; let valB = 0;
@@ -310,7 +318,7 @@ export default function BotsPage() {
     if (quickFilter === 'best3') return [...list].sort((a, b) => (b.portfolio?.total_pnl || 0) - (a.portfolio?.total_pnl || 0)).slice(0, 3)
     if (quickFilter === 'worst3') return [...list].sort((a, b) => (a.portfolio?.total_pnl || 0) - (b.portfolio?.total_pnl || 0)).slice(0, 3)
     return list
-  }, [bots, search, statusFilter, sortKey, sortDir, quickFilter])
+  }, [bots, search, statusFilter, statusFilterMode, sortKey, sortDir, quickFilter])
 
   if (!mounted) return null
 
@@ -509,6 +517,19 @@ export default function BotsPage() {
           >
             <ArrowUpDown size={16} />
           </button>
+          {/* Status filter dropdown */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <span style={{ color: '#4b5563', fontSize: '11px' }}>Állapot:</span>
+            <select
+              value={statusFilterMode}
+              onChange={e => setStatusFilterMode(e.target.value as any)}
+              style={{ background: '#13131f', color: '#fff', border: '1px solid #252535', padding: '5px 10px', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}
+            >
+              <option value="all">Mind</option>
+              <option value="running">Futó</option>
+              <option value="not-running">Nem futó</option>
+            </select>
+          </div>
         </div>
 
         <button onClick={() => setQuickFilter(quickFilter === 'best3' ? 'none' : 'best3')} style={{ padding: '7px 15px', borderRadius: '8px', border: '1px solid #252535', background: quickFilter === 'best3' ? '#fbbf2415' : '#13131f', color: '#fbbf24', fontSize: '11px', fontWeight: 700 }}><Trophy size={14} style={{ marginRight: 6 }} /> Top 3 Legjobb</button>

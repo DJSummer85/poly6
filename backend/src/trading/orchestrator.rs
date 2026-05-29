@@ -408,8 +408,12 @@ impl BotOrchestrator {
                 let oldest = rb.btc_price_history.first().map(|(p, _)| *p).unwrap_or(asset_price);
                 asset_change = Some((asset_price - oldest) / oldest);
 
-                // Velocity: % change per second over window (duration_secs evaluates to 1.0 based on reference repo)
-                let duration_secs = rb.btc_price_history.last().map(|(_, t)| t.elapsed().as_secs_f64()).unwrap_or(1.0).max(1.0);
+                // Velocity: % change per second over the actual window span (first → last entry)
+                let duration_secs = {
+                    let first_t = rb.btc_price_history.first().map(|(_, t)| *t).unwrap();
+                    let last_t  = rb.btc_price_history.last().map(|(_, t)| *t).unwrap();
+                    last_t.duration_since(first_t).as_secs_f64().max(1.0)
+                };
                 asset_velocity = Some(asset_change.unwrap() / duration_secs);
 
                 // Acceleration: change in velocity (simplified)

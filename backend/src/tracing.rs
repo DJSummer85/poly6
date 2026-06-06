@@ -60,10 +60,10 @@ impl TraceLog {
         self
     }
 
-    /// Log to stderr as JSON
+    /// Log as JSON via tracing
     pub fn log(&self) {
         if let Ok(json) = serde_json::to_string(self) {
-            eprintln!("{}", json);
+            tracing::info!("{}", json);
         }
     }
 }

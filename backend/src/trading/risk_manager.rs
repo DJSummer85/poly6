@@ -463,6 +463,18 @@ impl RiskManager {
         self.portfolio_start_balance = balance;
     }
 
+    /// Switch to live mode settings (stricter defaults)
+    pub fn set_live_mode(&mut self) {
+        self.settings = RiskSettings::default();
+        tracing::info!("[RiskManager] Switched to LIVE mode settings");
+    }
+
+    /// Switch to paper/demo mode settings (relaxed)
+    pub fn set_paper_mode(&mut self) {
+        self.settings = RiskSettings::paper_mode();
+        tracing::info!("[RiskManager] Switched to PAPER mode settings");
+    }
+
     // -- Private helpers --
 
     fn check_daily_reset(&mut self) {

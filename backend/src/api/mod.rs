@@ -51,6 +51,7 @@ pub struct CachedCredentials {
     pub funder: Option<String>,
     pub signature_type: u8,
     pub wallet_address: String,
+    pub deposit_wallet_address: Option<String>,
 }
 
 impl AppState {
@@ -133,6 +134,7 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/settings/store-all", post(settings::store_credentials))
         .route("/settings/keys", get(settings::list_api_keys))
         .route("/settings/keys/:provider", delete(settings::delete_provider_keys))
+        .route("/settings/refresh-cache", post(settings::refresh_credential_cache))
         .route("/settings/keys/store", post(settings::store_api_keys))
         .route("/system/status", get(monitoring::get_system_status))
         .route("/system/logs", get(monitoring::get_logs))
@@ -154,6 +156,11 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/funding/info", get(funding::funding_info))
         .route("/funding/wallet-info", get(funding::wallet_info))
         .route("/funding/wrap", post(funding::wrap_pusd))
+        .route("/funding/matic-balance", get(funding::matic_balance))
+        .route("/funding/save-deposit-wallet", post(funding::save_deposit_wallet))
+        .route("/funding/fetch-deposit-wallet", post(funding::fetch_deposit_wallet))
+        .route("/funding/deposit-wallet-info", get(funding::get_deposit_wallet_info))
+        .route("/funding/deploy-deposit-wallet", post(funding::deploy_deposit_wallet))
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             auth_middleware::auth_middleware,

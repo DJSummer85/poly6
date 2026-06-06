@@ -2,7 +2,7 @@
 //! Validates credentials, balance, and connection status
 
 use axum::{
-    extract::State,
+    extract::{State, Extension},
     response::Json,
     routing::{get, post},
     Router,
@@ -10,6 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
+use crate::middleware::auth::Claims;
 
 #[derive(Debug, Serialize)]
 pub struct LiveReadinessResponse {
@@ -70,14 +71,15 @@ pub async fn get_live_readiness(
 
 pub async fn validate_credentials(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Json(req): Json<ValidateCredsRequest>,
 ) -> Json<ValidateCredsResponse> {
-    let user_id = 1i64;
+    let user_id = claims.user_id;
 
     match crate::db::queries::get_bot_by_id(&state.db, req.bot_id, user_id).await {
         Ok(Some(_bot)) => {
-            // Check if we have cached credentials for this bot
-            let cached = state.credential_cache.read().await.get(&req.bot_id).cloned();
+            // Check if we have cached credentials for this user
+            let cached = state.credential_cache.read().await.get(&user_id).cloned();
 
             if let Some(creds) = cached {
                 Json(ValidateCredsResponse {

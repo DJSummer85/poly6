@@ -740,6 +740,7 @@ function BotCard({ bot, isInPos, onAction, onEdit, onDelete, isLoading }: any) {
  
   const [showChart, setShowChart] = useState(false);
   const [showParams, setShowParams] = useState(false);
+  const [showTrades, setShowTrades] = useState(false);
 
   return (
     <motion.div layout style={{
@@ -859,22 +860,38 @@ function BotCard({ bot, isInPos, onAction, onEdit, onDelete, isLoading }: any) {
       })()}
  
       <div style={{ marginTop: '4px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '7px', color: '#4b5563', marginBottom: '2px', fontWeight: 800, textTransform: 'uppercase' }}>
-          <span>UTÓBBI KÖTÉSEK</span>
-          <span style={{ color: '#6366f1' }}>{wins}W/{losses}L</span>
-        </div>
-        <div style={{ height: '40px', background: '#080812', borderRadius: '8px', border: '1px solid #1e1e30', padding: '4px', overflowY: 'auto' }}>
-          {(bot.pnl_history || []).slice().reverse().map((pnl: number, idx: number) => (
-            <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '8px', marginBottom: '2px', padding: '1px 3px', borderRadius: '3px', background: pnl > 0 ? '#22c55e08' : (pnl < 0 ? '#ef444408' : 'transparent') }}>
-              <span style={{ color: pnl > 0 ? '#22c55e' : (pnl < 0 ? '#ef4444' : '#4b5563'), fontWeight: 700 }}>
-                {pnl > 0 ? '✅ NYERT' : (pnl < 0 ? '❌ VESZT' : '⏳ TART')}
-              </span>
-              <span style={{ color: '#fafafa', opacity: 0.8 }}>${Math.abs(pnl).toFixed(1)}</span>
-            </div>
-          ))}
-          {(!bot.pnl_history || bot.pnl_history.length === 0) && <p style={{ fontSize: '7px', color: '#333', textAlign: 'center', marginTop: '8px' }}>Várakozás...</p>}
-        </div>
+        <button
+          type="button"
+          onClick={() => setShowTrades(true)}
+          style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%',
+            fontSize: '7px', color: '#6366f1', fontWeight: 800,
+            textTransform: 'uppercase', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
+            marginBottom: '2px'
+          }}
+        >
+          <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+            <History size={8} color="#6366f1" />
+            UTÓBBI KÖTÉSEK
+          </span>
+          <span style={{ color: '#818cf8', fontSize: '6px', display: 'flex', alignItems: 'center', gap: '2px' }}>
+            <span style={{ color: '#22c55e' }}>{wins}W</span>/<span style={{ color: '#f87171' }}>{losses}L</span>
+            <span style={{ color: '#4b5563', marginLeft: '2px' }}>›</span>
+          </span>
+        </button>
       </div>
+
+      {/* Trades Modal */}
+      <AnimatePresence>
+        {showTrades && (
+          <TradesModal
+            bot={bot}
+            wins={wins}
+            losses={losses}
+            onClose={() => setShowTrades(false)}
+          />
+        )}
+      </AnimatePresence>
 
       {/* Gondolat / Thought row */}
       <div style={{ marginTop: '4px', background: '#080812', border: '1px solid #1e1e30', borderRadius: '8px', padding: '5px 8px' }}>
@@ -1035,6 +1052,54 @@ function SettingsModal({ bot, onClose, onSave, isUpdating }: { bot: Bot, onClose
               {isUpdating ? <Loader2 size={18} className="animate-spin" /> : 'Beállítások mentése'}
             </button>
           </div>
+        </div>
+      </motion.div>
+    </motion.div>
+  )
+}
+
+function TradesModal({ bot, wins, losses, onClose }: { bot: any, wins: number, losses: number, onClose: () => void }) {
+  const pnlHistory = bot.pnl_history || [];
+  const recentTrades = pnlHistory.slice(-50).reverse();
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: '20px' }}>
+      <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} style={{ background: '#13131f', border: '1px solid #252535', borderRadius: '24px', width: '100%', maxWidth: '400px', overflow: 'hidden', display: 'flex', flexDirection: 'column', maxHeight: '80vh' }}>
+        <div style={{ padding: '20px', borderBottom: '1px solid #252535', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <History size={18} color="#6366f1" />
+            <h2 style={{ fontSize: '16px', fontWeight: 700, margin: 0 }}>{bot.name} - Kötések</h2>
+          </div>
+          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: '#4b5563', cursor: 'pointer' }}><X size={20} /></button>
+        </div>
+        <div style={{ padding: '20px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
+            <span style={{ color: '#22c55e', fontSize: '14px', fontWeight: 800 }}>{wins} Nyertes</span>
+            <span style={{ color: '#f87171', fontSize: '14px', fontWeight: 800 }}>{losses} Vesztes</span>
+          </div>
+          
+          {recentTrades.map((pnl: number, idx: number) => (
+            <div key={idx} style={{ 
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              padding: '12px 16px', borderRadius: '12px',
+              background: pnl > 0 ? '#22c55e08' : (pnl < 0 ? '#ef444408' : '#1e1e30'),
+              border: `1px solid ${pnl > 0 ? '#22c55e30' : (pnl < 0 ? '#ef444430' : '#252535')}`
+            }}>
+              <span style={{ color: pnl > 0 ? '#22c55e' : (pnl < 0 ? '#ef4444' : '#4b5563'), fontWeight: 800, fontSize: '14px' }}>
+                {pnl > 0 ? '✅ NYERT' : (pnl < 0 ? '❌ VESZT' : '⏳ TART')}
+              </span>
+              <span style={{ color: '#fafafa', fontSize: '15px', fontWeight: 700 }}>
+                {pnl >= 0 ? '+' : '-'}${Math.abs(pnl).toFixed(2)}
+              </span>
+            </div>
+          ))}
+          
+          {recentTrades.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '40px 20px', color: '#4b5563' }}>
+              <History size={40} style={{ margin: '0 auto 10px', opacity: 0.5 }} />
+              <p style={{ fontSize: '14px', margin: 0 }}>Még nincsenek kötések</p>
+            </div>
+          )}
         </div>
       </motion.div>
     </motion.div>

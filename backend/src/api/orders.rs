@@ -93,6 +93,7 @@ async fn get_decrypted_credentials(
                 funder: creds.funder.clone(),
                 signature_type: creds.signature_type,
                 wallet_address: creds.wallet_address.clone(),
+                deposit_wallet_address: None, // orders.rs fallback doesn't have deposit wallet info
             };
             {
                 let mut cache = state.credential_cache.write().await;
@@ -102,6 +103,131 @@ async fn get_decrypted_credentials(
         }
         Err(e) => Err(format!("Failed to get credentials: {}", e)),
     }
+}
+
+/// Derive a fresh API key for the wallet address and store it in the DB and cache.
+/// If derivation fails, returns the original credentials unchanged (they may still work).
+async fn derive_and_store_api_key(
+    state: &AppState,
+    user_id: i64,
+    mut creds: CachedCredentials,
+) -> CachedCredentials {
+    match trading::polymarket::derive_api_key_for_private_key(&creds.private_key).await {
+        Ok(derived) => {
+            tracing::info!(
+                "Derived fresh API key for wallet {} in orders.rs",
+                creds.wallet_address
+            );
+
+            // Store in api_keys table
+            let db = state.db();
+            let _ = queries::upsert_api_key(
+                &db, user_id, "polymarket_api_key", &derived.key, true,
+            )
+            .await;
+            let _ = queries::upsert_api_key(
+                &db, user_id, "polymarket_api_secret", &derived.secret, true,
+            )
+            .await;
+            let _ = queries::upsert_api_key(
+                &db, user_id, "polymarket_passphrase", &derived.passphrase, true,
+            )
+            .await;
+
+            // Update in-memory credential cache
+            creds.api_key = derived.key;
+            creds.api_secret = derived.secret;
+            creds.api_passphrase = derived.passphrase;
+            {
+                let mut cache = state.credential_cache.write().await;
+                cache.insert(user_id, creds.clone());
+            }
+
+            creds
+        }
+        Err(e) => {
+            // Log but continue with existing credentials — they might still work
+            tracing::warn!(
+                "API key derivation failed in orders.rs (will try existing): {}",
+                e
+            );
+            creds
+        }
+    }
+}
+
+/// Auto-detect deposit wallet and switch to POLY_1271 if the user has a funder
+/// address that differs from the wallet address.
+async fn auto_detect_deposit_wallet(
+    user_id: i64,
+    state: &AppState,
+    mut creds: CachedCredentials,
+) -> CachedCredentials {
+    if creds.funder.is_some()
+        && (creds.deposit_wallet_address.is_none() || creds.signature_type != 3)
+    {
+        tracing::info!(
+            "Auto-detecting deposit wallet for user {} (funder={}, sig_type={})",
+            user_id,
+            creds.funder.as_deref().unwrap_or(""),
+            creds.signature_type
+        );
+
+        match trading::polymarket::try_fetch_deposit_wallet(
+            &creds.private_key,
+            &creds.api_key,
+            &creds.api_secret,
+            &creds.api_passphrase,
+            creds.funder.as_deref(),
+        )
+        .await
+        {
+            Ok(Some(deposit_addr)) => {
+                tracing::info!(
+                    "Found deposit wallet {} for user {}, switching to POLY_1271",
+                    deposit_addr,
+                    user_id
+                );
+
+                // Store in DB
+                let db = state.db();
+                let _ = queries::upsert_api_key(
+                    &db,
+                    user_id,
+                    "polymarket_deposit_wallet_address",
+                    &deposit_addr,
+                    true,
+                )
+                .await;
+                let _ = queries::upsert_api_key(
+                    &db, user_id, "polymarket_signature_type", "3", true,
+                )
+                .await;
+
+                // Update cache
+                creds.deposit_wallet_address = Some(deposit_addr);
+                creds.signature_type = 3;
+                {
+                    let mut cache = state.credential_cache.write().await;
+                    cache.insert(user_id, creds.clone());
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "No deposit wallet found in relayer for user {}",
+                    user_id
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to query deposit wallet for user {}: {}",
+                    user_id,
+                    e
+                );
+            }
+        }
+    }
+    creds
 }
 
 fn create_polymarket_client(creds: &CachedCredentials) -> Result<trading::PolymarketClient, String> {
@@ -118,6 +244,7 @@ fn create_polymarket_client(creds: &CachedCredentials) -> Result<trading::Polyma
             passphrase: creds.api_passphrase.clone(),
         }),
         creds.funder.as_deref(),
+        creds.deposit_wallet_address.as_deref(),
     )
     .map_err(|e| format!("Failed to create client: {}", e))
 }
@@ -214,6 +341,15 @@ pub async fn place_order(
             .into_response();
         }
     };
+
+    // Auto-derive fresh API key for the wallet address before placing order.
+    // This ensures the API key is registered to the correct wallet address,
+    // preventing "signer address has to be the address of the API KEY" errors.
+    let creds = derive_and_store_api_key(&state, user_id, creds).await;
+
+    // Auto-detect deposit wallet and switch to POLY_1271 if needed.
+    // Handles "maker address not allowed, please use the deposit wallet flow" errors.
+    let creds = auto_detect_deposit_wallet(user_id, &state, creds).await;
 
     let pm_client = match create_polymarket_client(&creds) {
         Ok(client) => client,
@@ -567,6 +703,11 @@ pub async fn quick_trade(
             .into_response();
         }
     };
+
+    // Auto-derive fresh API key for the wallet address before placing order.
+    // This ensures the API key is registered to the correct wallet address,
+    // preventing "signer address has to be the address of the API KEY" errors.
+    let creds = derive_and_store_api_key(&state, user_id, creds).await;
 
     let pm_client = match create_polymarket_client(&creds) {
         Ok(c) => c,

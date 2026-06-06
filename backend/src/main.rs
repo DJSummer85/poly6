@@ -39,12 +39,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(keys) = db::queries::get_api_keys(&db, user_id).await {
                 let pk = keys.iter().find(|k| k.key_name == "polymarket_private_key").map(|k| k.key_value.clone());
                 if let Some(private_key) = pk {
+                    // Read stored settings from api_keys table
+                    let funder = keys.iter().find(|k| k.key_name == "polymarket_funder").map(|k| k.key_value.clone());
+                    let signature_type_str = keys.iter().find(|k| k.key_name == "polymarket_signature_type").map(|k| k.key_value.clone());
+                    let signature_type: u8 = signature_type_str.and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let wallet_address = match trading::PolymarketClient::new(&private_key) {
+                        Ok(client) => client.address(),
+                        Err(_) => String::new(),
+                    };
+
+                    // Always load stored deposit wallet address if available.
+                    // The orchestrator uses it for POLY_1271 (signature_type=3) order signing.
+                    // The HMAC auth uses the funder address (which matches the funder's API key).
+                    let deposit_wallet_address = keys.iter()
+                        .find(|k| k.key_name == "polymarket_deposit_wallet_address")
+                        .map(|k| k.key_value.clone());
+
+                    let api_key_val = keys.iter().find(|k| k.key_name == "polymarket_api_key").map(|k| k.key_value.clone()).unwrap_or_default();
+                    let api_secret_val = keys.iter().find(|k| k.key_name == "polymarket_api_secret").map(|k| k.key_value.clone()).unwrap_or_default();
+                    let api_passphrase_val = keys.iter().find(|k| k.key_name == "polymarket_passphrase").map(|k| k.key_value.clone()).unwrap_or_default();
+
+                    // If secret is empty (V2 key without secret/passphrase), try to derive
+                    // Use the FULL derived credentials from the CLOB (key, secret, passphrase)
+                    // because the user's website-created key might be registered to a different
+                    // address than the wallet. The derived key will be registered to the wallet.
+                    let (final_key, final_secret, final_passphrase) = if api_secret_val.is_empty() && !api_key_val.is_empty() {
+                        match trading::polymarket::derive_api_key_for_private_key(&private_key).await {
+                            Ok(creds) => {
+                                tracing::info!("Derived full CLOB credentials: key={}", creds.key);
+                                let pool = db.as_ref();
+                                sqlx::query("INSERT OR REPLACE INTO api_keys (user_id, key_name, key_value) VALUES (?, 'polymarket_api_key', ?)")
+                                    .bind(user_id).bind(&creds.key).execute(pool).await.ok();
+                                sqlx::query("INSERT OR REPLACE INTO api_keys (user_id, key_name, key_value) VALUES (?, 'polymarket_api_secret', ?)")
+                                    .bind(user_id).bind(&creds.secret).execute(pool).await.ok();
+                                sqlx::query("INSERT OR REPLACE INTO api_keys (user_id, key_name, key_value) VALUES (?, 'polymarket_passphrase', ?)")
+                                    .bind(user_id).bind(&creds.passphrase).execute(pool).await.ok();
+                                (creds.key, creds.secret, creds.passphrase)
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to derive API credentials for user {}: {}", user_id, e);
+                                (api_key_val, api_secret_val, api_passphrase_val)
+                            }
+                        }
+                    } else {
+                        (api_key_val, api_secret_val, api_passphrase_val)
+                    };
+
                     let mut cache = app_state.credential_cache.write().await;
                     cache.insert(user_id, api::CachedCredentials {
-                        api_key: keys.iter().find(|k| k.key_name == "polymarket_api_key").map(|k| k.key_value.clone()).unwrap_or_default(),
-                        api_secret: keys.iter().find(|k| k.key_name == "polymarket_api_secret").map(|k| k.key_value.clone()).unwrap_or_default(),
-                        api_passphrase: keys.iter().find(|k| k.key_name == "polymarket_passphrase").map(|k| k.key_value.clone()).unwrap_or_default(),
-                        private_key, funder: None, signature_type: 0, wallet_address: String::new(),
+                        api_key: final_key,
+                        api_secret: final_secret,
+                        api_passphrase: final_passphrase,
+                        private_key,
+                        funder,
+                        signature_type,
+                        wallet_address,
+                        deposit_wallet_address,
                     });
                 }
             }

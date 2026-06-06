@@ -12,6 +12,7 @@ import {
   Settings,
   Shield,
   Trash2,
+  Wallet,
   X,
   Zap,
 } from "lucide-react";
@@ -39,7 +40,7 @@ const API_KEYS_CONFIG: ApiKeyType[] = [
       { key: "api_secret", label: "API Secret", placeholder: "pm_secret_xxxxx", required: true },
       { key: "passphrase", label: "Passphrase", placeholder: "your_passphrase", required: true },
       { key: "private_key", label: "Private Key", placeholder: "0x...", required: true },
-      { key: "signature_type", label: "Signature Type (0=Metamask, 1=Email/Magic)", placeholder: "0", required: false },
+      { key: "signature_type", label: "Signature Type (0=Metamask, 1=Email/Magic, 3=Deposit Wallet/POLY_1271)", placeholder: "3", required: false },
       { key: "funder", label: "Profile Address (Optional)", placeholder: "0x...", required: false },
     ],
     status: "empty",
@@ -450,6 +451,10 @@ export default function SettingsPage() {
                   marginTop: "1.5rem",
                 }}
               >
+                {config.id === "polymarket" && config.status === "valid" && (
+                  <DepositWalletInput />
+                )}
+
                 {config.id === "telegram" && config.status === "valid" && (
                   <button
                     type="button"
@@ -585,6 +590,170 @@ export default function SettingsPage() {
           </ul>
         </motion.div>
       </motion.div>
+    </div>
+  );
+}
+
+// ─── Deposit Wallet Address Input ──────────────────────────────────────
+
+function DepositWalletInput() {
+  const [saving, setSaving] = useState(false);
+  const [fetching, setFetching] = useState(false);
+  const [address, setAddress] = useState("");
+  const [savedAddress, setSavedAddress] = useState<string | null>(null);
+
+  // Load saved address on mount
+  useEffect(() => {
+    const loadSaved = async () => {
+      try {
+        const info = await apiFetch<{
+          deposit_wallet_address: string | null;
+          message: string;
+        }>("/funding/deposit-wallet-info", { method: "GET" });
+        if (info.deposit_wallet_address) {
+          setSavedAddress(info.deposit_wallet_address);
+          setAddress(info.deposit_wallet_address);
+        }
+      } catch {
+        // Not saved yet, ignore
+      }
+    };
+    loadSaved();
+  }, []);
+
+  const handleSave = async () => {
+    if (saving || !address.trim()) return;
+    setSaving(true);
+
+    try {
+      const result = await apiFetch<{ success: boolean; wallet_address?: string; message: string }>(
+        "/funding/save-deposit-wallet",
+        {
+          method: "POST",
+          body: JSON.stringify({ wallet_address: address.trim() }),
+        }
+      );
+
+      if (result.success) {
+        setSavedAddress(result.wallet_address ?? address.trim());
+        toast.success(result.message);
+      } else {
+        toast.error(result.message || "Failed to save deposit wallet address");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleFetch = async () => {
+    if (fetching) return;
+    setFetching(true);
+
+    try {
+      const result = await apiFetch<{ success: boolean; wallet_address?: string; message: string }>(
+        "/funding/fetch-deposit-wallet",
+        { method: "POST" }
+      );
+
+      if (result.success && result.wallet_address) {
+        setAddress(result.wallet_address);
+        setSavedAddress(result.wallet_address);
+        toast.success(result.message);
+      } else {
+        toast.error(result.message || "No deposit wallet found on Polymarket");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to fetch");
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  return (
+    <div style={{ marginRight: "auto", display: "flex", flexDirection: "column", gap: "0.5rem", minWidth: 420 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        <Wallet size={16} style={{ color: "#a1a1aa" }} />
+        <span style={{ fontSize: 12, color: "#a1a1aa" }}>
+          Deposit Wallet Address (required for signature type 3)
+        </span>
+      </div>
+      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+        <input
+          type="text"
+          value={address}
+          onChange={(e) => setAddress(e.target.value)}
+          placeholder="0x... paste address manually or use auto-fetch"
+          className="input"
+          style={{
+            flex: 1,
+            minWidth: 200,
+            fontSize: 13,
+            fontFamily: "monospace",
+            color: savedAddress && savedAddress === address.trim() ? "#22c55e" : undefined,
+          }}
+        />
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saving || !address.trim()}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            padding: "0.5rem 1rem",
+            borderRadius: 8,
+            fontSize: 14,
+            color: savedAddress && savedAddress === address.trim() ? "#22c55e" : "#6366f1",
+            background: savedAddress && savedAddress === address.trim()
+              ? "rgba(34, 197, 94, 0.1)"
+              : "rgba(99, 102, 241, 0.1)",
+            border: savedAddress && savedAddress === address.trim()
+              ? "1px solid rgba(34, 197, 94, 0.2)"
+              : "1px solid rgba(99, 102, 241, 0.2)",
+            cursor: (saving || !address.trim()) ? "not-allowed" : "pointer",
+            whiteSpace: "nowrap",
+            opacity: saving ? 0.6 : 1,
+          }}
+        >
+          {saving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+          {saving ? "Saving..." : savedAddress && savedAddress === address.trim() ? "Saved ✓" : "Save"}
+        </button>
+        <button
+          type="button"
+          onClick={handleFetch}
+          disabled={fetching}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            padding: "0.5rem 1rem",
+            borderRadius: 8,
+            fontSize: 14,
+            color: "#a3e635",
+            background: "rgba(163, 230, 53, 0.1)",
+            border: "1px solid rgba(163, 230, 53, 0.2)",
+            cursor: fetching ? "not-allowed" : "pointer",
+            whiteSpace: "nowrap",
+            opacity: fetching ? 0.6 : 1,
+          }}
+        >
+          {fetching ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
+          {fetching ? "Fetching..." : "Auto-fetch"}
+        </button>
+      </div>
+      <span style={{ fontSize: 11, color: "#52525b" }}>
+        Auto-fetch from the Polymarket Relayer API, or manually paste from{" "}
+        <a
+          href="https://polymarket.com/settings/api"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: "#6366f1" }}
+        >
+          Polymarket.com Settings → API Keys
+        </a>
+      </span>
     </div>
   );
 }

@@ -1,4 +1,3 @@
-//! Execution adapters for demo and live trading
+//! Execution adapters for demo trading
 pub mod paper;
-pub mod live;
 

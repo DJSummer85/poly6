@@ -133,6 +133,17 @@ pub async fn restore_running_bots(orchestrator: Arc<BotOrchestrator>) {
             running.insert(bot.id, running_bot);
         }
 
+        // Set risk mode based on bot's trading mode during restore
+        {
+            let mut rm = orchestrator.risk_manager.write().await;
+            if bot.trading_mode == "live" {
+                rm.set_live_mode();
+            } else {
+                rm.set_paper_mode();
+            }
+            rm.set_portfolio_start_balance(session.start_balance);
+        }
+
         tracing::info!("Restored bot {} (session {}) with balance {:.2}", bot.id, session.id, session.start_balance);
 
         let orchestrator_clone = orchestrator.clone();
@@ -187,6 +198,12 @@ impl BotOrchestrator {
         {
             let mut rm = self.risk_manager.write().await;
             rm.set_portfolio_start_balance(current_balance);
+            // Set risk mode based on bot's trading mode
+            if bot.trading_mode == "live" {
+                rm.set_live_mode();
+            } else {
+                rm.set_paper_mode();
+            }
         }
         self.event_sender.send(BotEvent::SessionStarted { bot_id: bot.id, session_id, bot_name: bot.name.clone() }).ok();
         Ok(session_id)
@@ -211,6 +228,12 @@ impl BotOrchestrator {
         {
             let mut rm = self.risk_manager.write().await;
             rm.set_portfolio_start_balance(initial_balance);
+            // Set risk mode based on bot's trading mode
+            if bot.trading_mode == "live" {
+                rm.set_live_mode();
+            } else {
+                rm.set_paper_mode();
+            }
         }
         self.event_sender.send(BotEvent::SessionStarted { bot_id: bot.id, session_id, bot_name: bot.name.clone() }).ok();
         tracing::info!("Bot {} started (session {}), trading_mode={}", bot.id, session_id, bot.trading_mode);
@@ -231,7 +254,7 @@ impl BotOrchestrator {
         let mut rb = if let Some(b) = running_bot {
             b
         } else {
-            eprintln!("[DEBUG] Bot {} not in running_bots map, skipping cycle", bot_id);
+            tracing::debug!("Bot {} not in running_bots map, skipping cycle", bot_id);
             return Ok(());
         };
         let bot = queries::get_bot_by_id(&self.db, bot_id, user_id).await.map_err(|e| e.to_string())?.ok_or("Bot not found")?;
@@ -247,10 +270,37 @@ impl BotOrchestrator {
                     // Megpróbáljuk lekérni a valódi egyenleget a tőzsdéről
                     match Self::fetch_live_balance(creds).await {
                         Ok(real_balance) => {
-                            if (real_balance - portfolio.balance).abs() > 0.001 {
-                                tracing::info!("[LIVE] Syncing real balance for bot {}: ${:.2}", bot_id, real_balance);
-                                queries::update_portfolio_balance(&self.db, bot_id, real_balance).await.ok();
-                                self.event_sender.send(BotEvent::BalanceUpdated { bot_id, balance: real_balance }).ok();
+                            if real_balance > 0.0 {
+                                if (real_balance - portfolio.balance).abs() > 0.001 {
+                                    tracing::info!("[LIVE] Syncing real balance for bot {}: ${:.2}", bot_id, real_balance);
+                                    
+                                    if (portfolio.initial_balance - 100.0).abs() < 0.001 || portfolio.initial_balance == 0.0 {
+                                        tracing::info!("[LIVE] Syncing initial_balance to real_balance for bot {}", bot_id);
+                                        let pool = self.db.as_ref();
+                                        sqlx::query("UPDATE bot_portfolios SET balance = ?, initial_balance = ?, peak_balance = ? WHERE bot_id = ?")
+                                            .bind(real_balance)
+                                            .bind(real_balance)
+                                            .bind(real_balance)
+                                            .bind(bot_id)
+                                            .execute(pool)
+                                            .await.ok();
+                                            
+                                        // Update RiskManager with new initial balance
+                                        let mut rm = self.risk_manager.write().await;
+                                        rm.set_portfolio_start_balance(real_balance);
+                                    } else {
+                                        queries::update_portfolio_balance(&self.db, bot_id, real_balance).await.ok();
+                                    }
+                                    
+                                    self.event_sender.send(BotEvent::BalanceUpdated { bot_id, balance: real_balance }).ok();
+                                }
+                            } else {
+                                // Ha 0.0 az egyenleg, az lehet API hiba vagy nincs pUSD a tárcában.
+                                // Ne írjuk felül a portfóliót 0-ra, mert az stop-lockot triggerelne!
+                                tracing::warn!(
+                                    "[LIVE] Balance fetch returned 0.0 for bot {} — skipping sync to preserve current portfolio ({:.2})",
+                                    bot_id, portfolio.balance
+                                );
                             }
                         }
                         Err(e) => {
@@ -277,15 +327,16 @@ impl BotOrchestrator {
             }
         }
 
-        let fresh_balance_for_stop = queries::get_portfolio(&self.db, bot_id, user_id)
+        let (fresh_balance_for_stop, initial_balance_for_stop) = queries::get_portfolio(&self.db, bot_id, user_id)
             .await
             .ok()
             .flatten()
-            .map(|p| p.balance)
-            .unwrap_or(portfolio.balance);
+            .map(|p| (p.balance, p.initial_balance))
+            .unwrap_or((portfolio.balance, portfolio.initial_balance));
+
         // --- DYNAMIC STOP LOSS ---
         let stop_loss_pct = bot.stop_loss.abs().max(10.0); // Minimum 10% védelem
-        let stop_threshold = portfolio.initial_balance * (1.0 - stop_loss_pct / 100.0);
+        let stop_threshold = initial_balance_for_stop * (1.0 - stop_loss_pct / 100.0);
 
         if fresh_balance_for_stop <= stop_threshold {
             tracing::warn!("Bot {} hit stop-loss: balance={:.2}, threshold={:.2}", bot_id, fresh_balance_for_stop, stop_threshold);
@@ -336,11 +387,10 @@ impl BotOrchestrator {
                         let settlement_credit = if won { potential_return * (1.0 - polymarket_fee_rate) } else { 0.0 };
                         let pnl_for_stats = settlement_credit - bet.bet_size;
 
-                        queries::record_paper_settlement(&self.db, bot_id, bet.decision_id, won, settlement_credit, pnl_for_stats).await.ok();
+                        queries::record_settlement(&self.db, bot_id, bet.decision_id, won, settlement_credit, pnl_for_stats, &bot.trading_mode).await.ok();
 
-                        self.event_sender.send(BotEvent::TradeResult { bot_id, won, pnl: pnl_for_stats }).ok();
-                        eprintln!("[SETTLE-EMPTY] Bot {}: {} won={} credit={:.4} pnl={:.4} price_diff={:.6}",
-                            bot_id, bet.side, won, settlement_credit, pnl_for_stats, diff);
+                        self.event_sender.send(BotEvent::TradeResult { bot_id, won, pnl: pnl_for_stats }).ok();                            tracing::info!("[SETTLE] Bot {}: {} won={} credit={:.4} pnl={:.4} price_diff={:.6}",
+                                bot_id, bet.side, won, settlement_credit, pnl_for_stats, diff);
 
                         {
                             let mut rm = self.risk_manager.write().await;
@@ -441,7 +491,7 @@ impl BotOrchestrator {
         // vagy amikor korábban nem volt elérhető piac), állítsuk be most
         if rb.btc_window_open.is_none() {
             rb.btc_window_open = Some(asset_price);
-            eprintln!("[MARKET] Bot {} initial window_open set to {:.2}", bot_id, asset_price);
+            tracing::info!("Bot {} initial window_open set to {:.2}", bot_id, asset_price);
         }
 
         let market_ended = market.time_remaining <= 5;
@@ -488,7 +538,7 @@ impl BotOrchestrator {
                 
                 let pnl_for_stats = settlement_credit - bet.bet_size;
                 
-                queries::record_paper_settlement(&self.db, bot_id, bet.decision_id, won, settlement_credit, pnl_for_stats).await.ok();
+                queries::record_settlement(&self.db, bot_id, bet.decision_id, won, settlement_credit, pnl_for_stats, &bot.trading_mode).await.ok();
                 
                 // Telegram értesítés
                 if let Some(ref telegram) = self.telegram_service {
@@ -505,7 +555,7 @@ impl BotOrchestrator {
                 }
 
                 self.event_sender.send(BotEvent::TradeResult { bot_id, won, pnl: pnl_for_stats }).ok();
-                eprintln!("[SETTLE] Bot {}: {} won={} credit={:.4} pnl={:.4} price_diff={:.6}",
+                tracing::info!("[SETTLE] Bot {}: {} won={} credit={:.4} pnl={:.4} price_diff={:.6}",
                     bot_id, bet.side, won, settlement_credit, pnl_for_stats, diff);
 
                 {
@@ -517,7 +567,7 @@ impl BotOrchestrator {
                 // have up-to-date consecutive loss/win data
                 {
                     let mut lt = self.loss_tracker.write().await;
-                    // fresh_balance_for_stop already reflects the balance AFTER record_paper_settlement was called
+                    // fresh_balance_for_stop already reflects the balance AFTER record_settlement was called
                     // DO NOT add pnl_for_stats again (would double-count PnL in peak_balance/drawdown tracking)
                     lt.update_settlement(bot_id, won, pnl_for_stats, fresh_balance_for_stop);
                 }
@@ -573,11 +623,11 @@ impl BotOrchestrator {
         let mut strategy = rb.strategy.clone();
         let asset_lower = market.asset.to_lowercase();
         match asset_lower.as_str() {
-            "btc" => strategy.params.min_delta = 0.0006, // ~0.06% (volt: 0.3%) - érzékeny korai trend-belépés
-            "eth" => strategy.params.min_delta = 0.0010, // ~0.10% (volt: 0.5%)
-            "sol" => strategy.params.min_delta = 0.0018, // ~0.18% (volt: 0.8%)
-            "xrp" => strategy.params.min_delta = 0.0012, // ~0.12% (volt: 0.6%)
-            _ => strategy.params.min_delta = 0.0010,
+            "btc" => strategy.params.min_delta = 0.0004, // ~0.04% (volt: 0.06%) - érzékeny korai trend-belépés
+            "eth" => strategy.params.min_delta = 0.0005, // ~0.05% (volt: 0.10%)
+            "sol" => strategy.params.min_delta = 0.0006, // ~0.06% (volt: 0.18%)
+            "xrp" => strategy.params.min_delta = 0.0006, // ~0.06% (volt: 0.12%)
+            _ => strategy.params.min_delta = 0.0005,
         }
         tracing::debug!(
             "Bot {} ({}) scanning {}; overriding min_delta to {:.4}",
@@ -588,7 +638,7 @@ impl BotOrchestrator {
         );
 
         let signal = strategy.evaluate_with_context(ctx.clone());
-        eprintln!("[SIGNAL] Bot {} signal: {:?}", bot_id, signal);
+        tracing::debug!("Bot {} signal: {:?}", bot_id, signal);
 
         // MINDEN szignált (a HOLD-ot is) elküldünk az SSE-n, hogy látszódjon a webes konzolban
         match &signal {
@@ -730,7 +780,7 @@ impl BotOrchestrator {
                         let reason = block_reason.unwrap_or_else(|| "Risk blocked".into());
                         tracing::info!("[RISK] Bot {} blocked: {} (risk_mult={:.2}, adj_conf={:.2}, kelly={:.2})",
                             bot_id, reason, risk_mult, adjusted_conf, kelly_bet);
-                        eprintln!("[RISK] Bot {} blocked: {}", bot_id, reason);
+                        tracing::warn!("Bot {} blocked: {}", bot_id, reason);
 
                         self.event_sender.send(BotEvent::TradeDecision {
                             bot_id,
@@ -764,28 +814,54 @@ impl BotOrchestrator {
                         let mut order_id = "paper_trade".to_string();
 
                         if bot.trading_mode == "live" {
-                            if let Some(ref cache) = credential_cache {
-                                let c = cache.read().await;
-                                if let Some(creds) = c.get(&user_id) {
+                            if let Some(ref cache_arc) = credential_cache {
+                                let mut updated_creds = {
+                                    let c = cache_arc.read().await;
+                                    c.get(&user_id).cloned()
+                                };
+
+                                if let Some(ref mut creds) = updated_creds {
+                                    // Use user-provided credentials as-is.
+                                    // The user manually created their API keys on the Polymarket website
+                                    // and configured them in Settings. We don't auto-create or derive keys.
+                                    
+                                    tracing::info!("Bot {} calling place_order...", bot_id);
                                     match Self::place_order(&market, outcome, final_bet, creds).await {
                                         Ok(id) => {
                                             order_id = id;
                                             order_placed = true;
+                                            tracing::info!("Bot {} order placed: id={}", bot_id, order_id);
                                         }
                                         Err(e) => {
                                             tracing::error!("Live order failed: {}", e);
+                                            tracing::error!("Bot {} live order FAILED: {}", bot_id, e);
+                                            // Send error to frontend so user can see what went wrong
+                                            self.event_sender.send(BotEvent::Error {
+                                                bot_id,
+                                                message: format!("LIVE ORDER FAILED: {}", e),
+                                            }).ok();
                                             // Cancel decision from coordinator since it was not placed
                                             let mut coord = self.coordinator.write().await;
                                             coord.cancel_decision(&market.condition_id, bot_id);
                                         }
                                     }
                                 } else {
-                                    tracing::error!("No cached credentials found for user {}", user_id);
+                                    let err_msg = "No cached credentials found for this user";
+                                    tracing::error!("{}user_id={}", err_msg, user_id);
+                                    self.event_sender.send(BotEvent::Error {
+                                        bot_id,
+                                        message: format!("LIVE ORDER FAILED: {}", err_msg),
+                                    }).ok();
                                     let mut coord = self.coordinator.write().await;
                                     coord.cancel_decision(&market.condition_id, bot_id);
                                 }
                             } else {
-                                tracing::error!("Credential cache not initialized");
+                                let err_msg = "Credential cache not initialized (server issue)";
+                                tracing::error!("{}", err_msg);
+                                self.event_sender.send(BotEvent::Error {
+                                    bot_id,
+                                    message: format!("LIVE ORDER FAILED: {}", err_msg),
+                                }).ok();
                                 let mut coord = self.coordinator.write().await;
                                 coord.cancel_decision(&market.condition_id, bot_id);
                             }
@@ -832,7 +908,7 @@ impl BotOrchestrator {
 
                             queries::update_portfolio_balance(&self.db, bot_id, fresh_balance - final_bet).await.ok();
                             
-                            eprintln!("[BET] Bot {}: {} ${:.2} @ {:.2} | balance: {:.2} → {:.2} (risk_mult={:.2}, conf={:.2}, mode={})",
+                            tracing::info!("Bot {}: {} ${:.2} @ {:.2} | balance: {:.2} → {:.2} (risk_mult={:.2}, conf={:.2}, mode={})",
                                 bot_id, outcome, final_bet, price, fresh_balance, fresh_balance - final_bet, risk_mult, bayes_prob, bot.trading_mode);
 
                             // Notify loss tracker that a trade was sent (pending settlement)
@@ -903,6 +979,10 @@ impl BotOrchestrator {
         let slippage = 1.008; 
         let order_price = if outcome == "YES" { (market.yes_price * slippage).min(0.99) } else { (market.no_price * slippage).min(0.99) };
 
+        tracing::info!("Starting live order: outcome={}, bet_size={:.2}, price={:.4}, token_id={}",
+            outcome, bet_size, order_price,
+            if outcome == "YES" { &market.yes_token_id } else { &market.no_token_id });
+
         // Create PolymarketClient from credentials
         let client = match PolymarketClient::from_api_credentials(
             &creds.private_key,
@@ -913,13 +993,17 @@ impl BotOrchestrator {
                 passphrase: creds.api_passphrase.clone(),
             }),
             creds.funder.as_deref(),
+            creds.deposit_wallet_address.as_deref(),
         ) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Failed to create PolymarketClient for live order: {}", e);
+                tracing::error!("Failed to create PolymarketClient: {}", e);
                 return Err(format!("Failed to create client: {}", e));
             }
         };
+
+        tracing::debug!("PolymarketClient created, creating order...");
 
         let token_id = if outcome == "YES" { market.yes_token_id.clone() } else { market.no_token_id.clone() };
         let side = if outcome == "YES" { "BUY" } else { "BUY" }; // Mindig BUY, ha kimenetelre fogadunk
@@ -932,21 +1016,23 @@ impl BotOrchestrator {
             side: side.to_string(),
         }, market.neg_risk).await {
             Ok(signed_order) => {
+                tracing::debug!("Order signed, posting to CLOB...");
                 match client.post_order(&signed_order).await {
                     Ok(response) => {
                         let order_id = response.order_id.unwrap_or_else(|| "unknown".to_string());
                         tracing::info!("Live order placed: id={}, outcome={}, size={}, price={}", order_id, outcome, bet_size, order_price);
+                        tracing::info!("Order successfully posted: order_id={}", order_id);
                         Ok(order_id)
                     }
                     Err(e) => {
                         tracing::error!("Failed to post order: {}", e);
-                        Err(format!("Failed to post order: {}", e))
+                        return Err(format!("Failed to post order: {}", e));
                     }
                 }
             }
             Err(e) => {
                 tracing::error!("Failed to create order: {}", e);
-                Err(format!("Failed to create order: {}", e))
+                return Err(format!("Failed to create order: {}", e));
             }
         }
     }

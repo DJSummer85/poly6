@@ -152,6 +152,38 @@ pub async fn login(
 
     state.credential_service.set_password(user.0, payload.password.clone()).await;
 
+    if let Ok(creds) = state.credential_service.get_credentials(&db, user.0).await {
+        // Load signature_type and deposit_wallet_address from DB api_keys table.
+        // The credential service may return stale values (e.g., signature_type=0)
+        // because it reads from encrypted JSON saved during initial setup.
+        let (signature_type, deposit_wallet_address) = if let Ok(keys) = crate::db::queries::get_api_keys(&db, user.0).await {
+            let sig = keys.iter()
+                .find(|k| k.key_name == "polymarket_signature_type")
+                .and_then(|k| k.key_value.parse::<u8>().ok())
+                .unwrap_or(creds.signature_type);
+            let deposit = keys.iter()
+                .find(|k| k.key_name == "polymarket_deposit_wallet_address")
+                .map(|k| k.key_value.clone());
+            (sig, deposit)
+        } else {
+            (creds.signature_type, None)
+        };
+
+        tracing::info!("Populated credential_cache for user {} on login (sig_type={}, deposit_wallet={:?})", user.0, signature_type, &deposit_wallet_address);
+
+        let mut cache = state.credential_cache.write().await;
+        cache.insert(user.0, crate::api::CachedCredentials {
+            api_key: creds.api_key,
+            api_secret: creds.api_secret,
+            api_passphrase: creds.api_passphrase,
+            private_key: creds.private_key,
+            funder: creds.funder,
+            signature_type,
+            wallet_address: creds.wallet_address,
+            deposit_wallet_address,
+        });
+    }
+
     match generate_token(user.0, &user.1) {
         Ok(token) => Json(AuthResponse {
             token,

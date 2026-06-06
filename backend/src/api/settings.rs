@@ -92,6 +92,8 @@ pub struct DeriveKeyResponse {
     pub success: bool,
     pub wallet_address: String,
     pub api_key: String,
+    pub api_secret: Option<String>,
+    pub api_passphrase: Option<String>,
     pub message: String,
 }
 
@@ -265,6 +267,7 @@ pub async fn store_credentials(
                     funder: payload.funder.clone(),
                     signature_type,
                     wallet_address: wallet_address.clone(),
+                    deposit_wallet_address: None,
                 });
             }
 
@@ -458,6 +461,7 @@ pub async fn update_settings(
                     funder: payload.funder.clone(),
                     signature_type,
                     wallet_address: client.address(),
+                    deposit_wallet_address: None,
                 });
             }
 
@@ -600,6 +604,16 @@ async fn populate_credential_cache(state: &crate::api::AppState, user_id: i64) {
                         Err(_) => String::new(),
                     };
 
+                    // Csak akkor rakjuk be a deposit wallet címet, ha signature_type == 3
+                    // Különben a create_order_v2 POLY_1271 módba kapcsol tőle!
+                    let deposit_wallet_address = if signature_type == 3 {
+                        keys.iter()
+                            .find(|k| k.key_name == "polymarket_deposit_wallet_address")
+                            .map(|k| k.key_value.clone())
+                    } else {
+                        None
+                    };
+
                     let mut cache = state.credential_cache.write().await;
                     cache.insert(user_id, crate::api::CachedCredentials {
                         api_key: key.clone(),
@@ -609,8 +623,9 @@ async fn populate_credential_cache(state: &crate::api::AppState, user_id: i64) {
                         funder,
                         signature_type,
                         wallet_address,
+                        deposit_wallet_address,
                     });
-                    tracing::info!("Updated credential cache for user {}", user_id);
+                    tracing::info!("Updated credential cache for user {} (sig_type={})", user_id, signature_type);
                 }
             }
         }
@@ -636,6 +651,39 @@ pub async fn delete_provider_keys(
 
     Json(serde_json::json!({ "success": true }))
     .into_response()
+}
+
+/// POST /settings/refresh-cache - Manually refresh the in-memory credential cache from DB
+/// This is useful when keys were updated but the cache still has stale data
+pub async fn refresh_credential_cache(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> Response {
+    let user_id = claims.user_id;
+    tracing::info!("Manual credential cache refresh requested for user {}", user_id);
+    populate_credential_cache(&state, user_id).await;
+
+    // Verify the cache was updated correctly
+    {
+        let cache = state.credential_cache.read().await;
+        if let Some(creds) = cache.get(&user_id) {
+            tracing::info!("Cache refresh done: sig_type={}, deposit_wallet={:?}, funder={:?}",
+                creds.signature_type, creds.deposit_wallet_address, creds.funder);
+            return Json(serde_json::json!({
+                "success": true,
+                "message": "Credential cache refreshed",
+                "signature_type": creds.signature_type,
+                "has_deposit_wallet": creds.deposit_wallet_address.is_some(),
+                "has_funder": creds.funder.is_some(),
+                "wallet_address": creds.wallet_address,
+            })).into_response();
+        }
+    }
+
+    Json(serde_json::json!({
+        "success": false,
+        "message": "Failed to refresh cache - no credentials found for user"
+    })).into_response()
 }
 
 /// Derive API key without storing (for testing/dry run)
@@ -664,7 +712,9 @@ pub async fn derive_key(
         Ok(creds) => Json(DeriveKeyResponse {
             success: true,
             wallet_address: client.address(),
-            api_key: creds.key,
+            api_key: creds.key.clone(),
+            api_secret: Some(creds.secret.clone()),
+            api_passphrase: Some(creds.passphrase.clone()),
             message: format!("Successfully derived API key for {}", client.address()),
         })
         .into_response(),
@@ -672,6 +722,8 @@ pub async fn derive_key(
             success: false,
             wallet_address: client.address(),
             api_key: String::new(),
+            api_secret: None,
+            api_passphrase: None,
             message: format!("Failed to derive key: {}", e),
         })
         .into_response(),

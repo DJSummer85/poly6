@@ -586,7 +586,7 @@ impl StrategyExecutor {
         }
 
         // Minimum velocity threshold
-        let min_velocity: f64 = 0.00002;
+        let min_velocity: f64 = 0.000015;
 
         if velocity.abs() < min_velocity {
             return Signal::Hold(format!("Velocity too low: {:.4}%/s (choppy)", velocity * 100.0));
@@ -641,7 +641,7 @@ impl StrategyExecutor {
     }
 
     // Stricter velocity threshold for Binance data
-    let min_velocity: f64 = 0.00003; // 0.003%/s
+    let min_velocity: f64 = 0.000015; // 0.0015%/s
 
     if velocity.abs() < min_velocity {
         return Signal::Hold(format!("Velocity too low: {:.4}%/s (choppy)", velocity * 100.0));
@@ -1382,7 +1382,7 @@ impl StrategyExecutor {
         let change_pct = change * 100.0;
         let abs_change = change_pct.abs();
 
-        let threshold = 0.15_f64;
+        let threshold = 0.08_f64;
 
         if abs_change < threshold {
             return Signal::Hold(format!(

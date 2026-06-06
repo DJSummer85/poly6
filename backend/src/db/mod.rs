@@ -1623,21 +1623,23 @@ sqlx::query(
         Ok(result)
     }
 
-    /// Record paper trade settlement: update portfolio + trade_decisions.
+    /// Record trade settlement: update trade_decisions + portfolio.
     ///
-    /// - `settlement_credit`: az egyenleghez hozzáadandó összeg
+    /// - `mode`: "paper" or "live" — live mode skips balance updates (real balance comes from wallet sync)
+    /// - `settlement_credit`: az egyenleghez hozzáadandó összeg (paper mode only)
     ///     WIN:  bet_size + profit (tét visszajár + profit)
     ///     LOSE: 0.0             (tét már le volt vonva fogadáskor)
     /// - `pnl_for_stats`: a statisztikai total_pnl-hez használt nettó PnL
     ///     WIN:  +profit_only
     ///     LOSE: -bet_size
-    pub async fn record_paper_settlement(
+    pub async fn record_settlement(
         db: &Db,
         bot_id: i64,
         decision_id: i64,
         won: bool,
         settlement_credit: f64,
         pnl_for_stats: f64,
+        mode: &str,
     ) -> Result<(), sqlx::Error> {
         let pool = db.as_ref();
 
@@ -1648,31 +1650,50 @@ sqlx::query(
             .execute(pool)
             .await?;
 
-        // Update portfolio stats
+        let is_live = mode == "live";
+
         if won {
-            // Nyerés: visszaadjuk a tétet + profitot az egyenlegbe,
-            // a total_pnl-be csak a nettó profitot könyveljük.
-            sqlx::query(
-                r#"
-                UPDATE bot_portfolios SET
-                    balance = balance + ?,
-                    winning_trades = winning_trades + 1,
-                    total_trades = total_trades + 1,
-                    total_pnl = total_pnl + ?,
-                    peak_balance = MAX(peak_balance, balance + ?),
-                    last_trade_time = datetime('now'),
-                    updated_at = datetime('now')
-                WHERE bot_id = ?
-                "#,
-            )
-            .bind(settlement_credit) // balance növelés = tét + profit
-            .bind(pnl_for_stats)     // total_pnl növelés = csak profit
-            .bind(settlement_credit) // peak_balance számítás
-            .bind(bot_id)
-            .execute(pool)
-            .await?;
+            if is_live {
+                // Live mode: csak statokat frissítjük, balance-t NEM (valós egyenleg a wallet szinkronból jön)
+                sqlx::query(
+                    r#"
+                    UPDATE bot_portfolios SET
+                        winning_trades = winning_trades + 1,
+                        total_trades = total_trades + 1,
+                        total_pnl = total_pnl + ?,
+                        last_trade_time = datetime('now'),
+                        updated_at = datetime('now')
+                    WHERE bot_id = ?
+                    "#,
+                )
+                .bind(pnl_for_stats)
+                .bind(bot_id)
+                .execute(pool)
+                .await?;
+            } else {
+                // Paper mode: balance növelés = tét + profit
+                sqlx::query(
+                    r#"
+                    UPDATE bot_portfolios SET
+                        balance = balance + ?,
+                        winning_trades = winning_trades + 1,
+                        total_trades = total_trades + 1,
+                        total_pnl = total_pnl + ?,
+                        peak_balance = MAX(peak_balance, balance + ?),
+                        last_trade_time = datetime('now'),
+                        updated_at = datetime('now')
+                    WHERE bot_id = ?
+                    "#,
+                )
+                .bind(settlement_credit) // balance növelés = tét + profit
+                .bind(pnl_for_stats)     // total_pnl növelés = csak profit
+                .bind(settlement_credit) // peak_balance számítás
+                .bind(bot_id)
+                .execute(pool)
+                .await?;
+            }
         } else {
-            // Veszítés: a tét már le lett vonva fogadáskor (update_portfolio_balance).
+            // Loss — a tét már le lett vonva fogadáskor (update_portfolio_balance).
             // NE vonjuk le mégegyszer a balance-ból! Csak a statokat frissítjük.
             let loss = pnl_for_stats.abs(); // = bet_size
             sqlx::query(

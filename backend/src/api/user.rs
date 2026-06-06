@@ -129,6 +129,7 @@ async fn load_legacy_api_keys(
         funder: None,
         signature_type: 0,
         wallet_address: wallet,
+        deposit_wallet_address: None,
     };
 
     // Populate cache for next time

@@ -36,9 +36,9 @@ const API_KEYS_CONFIG: ApiKeyType[] = [
     name: "Polymarket API",
     description: "Kereskedési bot API kulcsok a Polymarket platformhoz",
     fields: [
-      { key: "api_key", label: "API Key", placeholder: "pm_api_xxxxx", required: true },
-      { key: "api_secret", label: "API Secret", placeholder: "pm_secret_xxxxx", required: true },
-      { key: "passphrase", label: "Passphrase", placeholder: "your_passphrase", required: true },
+      { key: "api_key", label: "API Key", placeholder: "pm_api_xxxxx (üresen hagyható – auto-deriválás)", required: false },
+      { key: "api_secret", label: "API Secret", placeholder: "pm_secret_xxxxx (üresen hagyható – auto-deriválás)", required: false },
+      { key: "passphrase", label: "Passphrase", placeholder: "your_passphrase (üresen hagyható – auto-deriválás)", required: false },
       { key: "private_key", label: "Private Key", placeholder: "0x...", required: true },
       { key: "signature_type", label: "Signature Type (0=Metamask, 1=Email/Magic, 3=Deposit Wallet/POLY_1271)", placeholder: "3", required: false },
       { key: "funder", label: "Profile Address (Optional)", placeholder: "0x...", required: false },
@@ -169,22 +169,48 @@ export default function SettingsPage() {
 
     if (!config) return;
 
-    // Validate all fields first
+    // Validate required fields first
     for (const field of config.fields) {
       if (field.required && !values[field.key]) {
         toast.error(`${field.label} megadása kötelező`);
         setLoading(false);
         return;
       }
-
-      const isValid = await validateKey(provider, field.key, values[field.key]);
-      if (field.required && !isValid) {
-        setLoading(false);
-        return;
-      }
     }
 
-    // Save all keys
+    // For Polymarket: use PUT /settings which auto-derives the API key from private key
+    if (provider === "polymarket") {
+      try {
+        const password = prompt("Add meg a jelszavadat a kulcsok titkosításához:") || "default";
+        const body: Record<string, unknown> = {
+          polymarket_private_key: values["private_key"],
+          password,
+          signature_type: values["signature_type"] ? parseInt(values["signature_type"]) : 0,
+          funder: values["funder"] || null,
+        };
+        const result = await apiFetch<{ success?: boolean; error?: string; wallet_address?: string }>("/settings", {
+          method: "PUT",
+          body: JSON.stringify(body),
+        });
+        if (result && (result as any).error) {
+          toast.error(`Hiba: ${(result as any).error}`);
+          setApiKeys((prev) => prev.map((c) => (c.id === provider ? { ...c, status: "invalid" } : c)));
+        } else {
+          toast.success("Polymarket kulcsok sikeresen deriválva és mentve!");
+          setApiKeys((prev) => prev.map((c) => (c.id === provider ? { ...c, status: "valid" } : c)));
+          setEditingKey(null);
+          await loadStoredKeys();
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Mentés sikertelen");
+        setApiKeys((prev) => prev.map((c) => (c.id === provider ? { ...c, status: "invalid" } : c)));
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // For other providers: save fields individually
     try {
       for (const field of config.fields) {
         if (values[field.key]) {

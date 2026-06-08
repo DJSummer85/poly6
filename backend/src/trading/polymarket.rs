@@ -14,7 +14,7 @@ use sha2::Sha256;
 use base64::{Engine, engine::general_purpose::{URL_SAFE_NO_PAD, STANDARD}};
 use std::time::Duration;
 
-const CLOB_HOST: &str = "https://clob.polymarket.com";
+pub const CLOB_HOST: &str = "https://clob.polymarket.com";
 const RELAYER_HOST: &str = "https://relayer-v2.polymarket.com";
 const DATA_HOST: &str = "https://data-api.polymarket.com";
 const CHAIN_ID: u64 = 137;
@@ -31,13 +31,13 @@ pub const COLLATERAL_ONRAMP: &str = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
 pub const USDC_E_TOKEN: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 pub const USDC_NATIVE: &str = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
 pub const POLYGON_RPCS: &[&str] = &[
+    "https://polygon-mainnet.g.alchemy.com/v2/NOILHJYSTckN6upDPO9Uz",
     "https://rpc.ankr.com/polygon",
-    "https://polygon-mainnet.public.blastapi.io",
     "https://1rpc.io/matic",
     "https://polygon.llamarpc.com",
 ];
 
-pub const POLYGON_RPC: &str = "https://rpc.ankr.com/polygon";
+pub const POLYGON_RPC: &str = "https://polygon-mainnet.g.alchemy.com/v2/NOILHJYSTckN6upDPO9Uz";
 pub const EXCHANGE_DOMAIN_VERSION: &str = "2";
 pub const CLOB_AUTH_DOMAIN_VERSION: &str = "1";
 
@@ -461,21 +461,29 @@ impl PolymarketClient {
             0 => normalized,
             r => format!("{}{}", normalized, "=".repeat(4 - r)),
         };
-        base64::engine::general_purpose::STANDARD
-            .decode(&padded)
-            .unwrap_or_else(|_| secret.as_bytes().to_vec())
+        match base64::engine::general_purpose::STANDARD.decode(&padded) {
+            Ok(bytes) => {
+                tracing::debug!("decode_api_secret: Base64 decoded OK, len={}", bytes.len());
+                bytes
+            }
+            Err(e) => {
+                tracing::warn!("decode_api_secret: Base64 decode FAILED ({}), using raw bytes", e);
+                secret.as_bytes().to_vec()
+            }
+        }
     }
 
     fn build_authed_get(&self, path: &str) -> reqwest::RequestBuilder {
         let creds = self.creds.as_ref().expect("API credentials not set");
-        let timestamp = chrono::Utc::now().timestamp().to_string();
+        // Polymarket CLOB expects millisecond timestamp (like JS Date.now())
+        let timestamp = (chrono::Utc::now().timestamp_millis()).to_string();
         let message = format!("{}GET{}", timestamp, path);
 
         let secret_bytes = Self::decode_api_secret(&creds.secret);
 
         let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).expect("HMAC key size");
         mac.update(message.as_bytes());
-        let signature = STANDARD.encode(mac.finalize().into_bytes());
+        let signature = base64::engine::general_purpose::URL_SAFE.encode(mac.finalize().into_bytes());
 
         let url = format!("{}{}", CLOB_HOST, path);
         self.http_client.get(&url)
@@ -488,14 +496,14 @@ impl PolymarketClient {
 
     fn build_relayer_get(&self, path: &str) -> reqwest::RequestBuilder {
         let creds = self.creds.as_ref().expect("API credentials not set");
-        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let timestamp = (chrono::Utc::now().timestamp_millis()).to_string();
         let message = format!("{}GET{}", timestamp, path);
 
         let secret_bytes = Self::decode_api_secret(&creds.secret);
 
         let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).expect("HMAC key size");
         mac.update(message.as_bytes());
-        let signature = STANDARD.encode(mac.finalize().into_bytes());
+        let signature = base64::engine::general_purpose::URL_SAFE.encode(mac.finalize().into_bytes());
 
         let url = format!("{}{}", RELAYER_HOST, path);
         self.http_client.get(&url)
@@ -508,17 +516,17 @@ impl PolymarketClient {
 
     fn build_authed_post_with_body(&self, path: &str, body: &str) -> reqwest::RequestBuilder {
         let creds = self.creds.as_ref().expect("API credentials not set");
-        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let timestamp = (chrono::Utc::now().timestamp_millis()).to_string();
 
         let message = format!("{}POST{}{}", timestamp, path, body);
 
         let secret_bytes = Self::decode_api_secret(&creds.secret);
-
         let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).expect("HMAC key size");
         mac.update(message.as_bytes());
-        let signature = STANDARD.encode(mac.finalize().into_bytes());
+        let signature = base64::engine::general_purpose::URL_SAFE.encode(mac.finalize().into_bytes());
 
         let url = format!("{}{}", CLOB_HOST, path);
+        tracing::debug!("HMAC POST: timestamp={} key={} path={}", timestamp, &creds.key, path);
         self.http_client.post(&url)
             .header("POLY_ADDRESS", self.hmac_address())
             .header("POLY_SIGNATURE", &signature)
@@ -595,6 +603,30 @@ impl PolymarketClient {
 
     // ─── API Key Management ───────────────────────────────────────────────
 
+    /// Build L1 (ClobAuth EIP-712) request headers for a given private key and address.
+    /// Used externally by the rotate_api_key handler to DELETE an existing key.
+    pub fn build_l1_headers(
+        private_key: &str,
+        address_str: &str,
+        timestamp: &str,
+        nonce: U256,
+        message_str: &str,
+    ) -> Result<reqwest::header::HeaderMap, PolymarketError> {
+        let pk_bytes = hex::decode(private_key.trim_start_matches("0x"))
+            .map_err(|e| PolymarketError::SignatureFailed(e.to_string()))?;
+        let addr_bytes = hex::decode(address_str.trim_start_matches("0x"))
+            .map_err(|e| PolymarketError::SignatureFailed(e.to_string()))?;
+        let address = H160::from_slice(&addr_bytes);
+        let sig = Self::compute_clob_auth_signature(&pk_bytes, address, timestamp, nonce, message_str)?;
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("POLY_ADDRESS",   address_str.parse().unwrap());
+        headers.insert("POLY_SIGNATURE", sig.parse().unwrap());
+        headers.insert("POLY_TIMESTAMP", timestamp.parse().unwrap());
+        headers.insert("POLY_NONCE",     nonce.to_string().parse().unwrap());
+        Ok(headers)
+    }
+
     pub async fn create_or_derive_api_key(&mut self) -> Result<ApiKeyCreds, PolymarketError> {
         let address = self.address_h160();
         let address_str = format!("{:#042x}", address);
@@ -664,8 +696,9 @@ impl PolymarketClient {
                 Ok(r) if r.status().is_success() => {
                     if let Ok(raw) = r.json::<serde_json::Value>().await {
                         if let Ok(creds) = Self::parse_api_key_response(&raw) {
+                            tracing::info!("Derived existing API key via GET /auth/derive-api-key: key={} passphrase={}", 
+                                creds.key, creds.passphrase);
                             self.creds = Some(creds.clone());
-                            tracing::info!("Derived existing API key via GET /auth/derive-api-key");
                             return Ok(creds);
                         }
                     }
@@ -924,18 +957,19 @@ impl PolymarketClient {
 
         let (maker, signer) = if use_poly_1271 {
             // POLY_1271 (signature_type=3, deposit wallet flow):
-            //   - maker = deposit wallet contract (where pUSD funds are held)
-            //   - signer = deposit wallet (the smart contract verifies the ERC-1271 signature)
+            //   - maker  = deposit wallet contract (where pUSD funds are held)
+            //   - signer = EOA wallet address (= the address the API key is registered to)
             //
-            // For POLY_1271, both maker AND signer are the deposit wallet address.
-            // The ERC-7739 POLY_1271 signature is signed by the EOA and verified
-            // by the deposit wallet contract via isValidSignature().
+            // The Polymarket CLOB enforces: "the order signer address has to be the address
+            // of the API KEY". The API key is always registered to the EOA wallet, NOT the
+            // deposit wallet. So signer MUST be the EOA, not the deposit wallet.
             //
-            // The `owner` field tells the CLOB which API key to use (EOA wallet hex).
-            // The POLY_ADDRESS header is the EOA wallet for HMAC auth.
+            // The ERC-7739 POLY_1271 signature is produced by the EOA private key and
+            // verified by the deposit wallet contract via ERC-1271 isValidSignature().
             let deposit_addr = self.deposit_wallet_address
                 .unwrap_or_else(|| self.address_h160());
-            (deposit_addr, deposit_addr)
+            let eoa_addr = self.address_h160(); // EOA = private key derived address
+            (deposit_addr, eoa_addr)
         } else {
             // EOA standard: maker = signer = EOA wallet
             let wallet_addr = self.address_h160();
@@ -958,8 +992,9 @@ impl PolymarketClient {
             // Use the CTF Exchange domain separator as app_domain_separator
             let domain_sep = Self::compute_app_domain_separator(Some(&get_exchange_address(is_neg_risk)));
 
-            // Use the actual deposit wallet address as the verifying contract for ERC-7739.
-            // Note: `signer` is the funder (matches API key), NOT the deposit wallet.
+            // ERC-7739 POLY_1271: verifying contract = deposit wallet address.
+            // The EOA private key signs the digest; the deposit wallet contract
+            // verifies via isValidSignature(). `poly_signer` must be the deposit wallet.
             let poly_signer = self.deposit_wallet_address
                 .unwrap_or_else(|| self.address_h160());
             Self::build_poly_1271_signature(
@@ -1054,14 +1089,14 @@ impl PolymarketClient {
         let path = format!("/orders/{}", order_id);
         let creds = self.creds.as_ref()
             .ok_or(PolymarketError::AuthFailed("No API credentials".to_string()))?;
-        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let timestamp = (chrono::Utc::now().timestamp_millis()).to_string();
         let message = format!("{}DELETE{}", timestamp, path);
 
         let secret_bytes = Self::decode_api_secret(&creds.secret);
 
         let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).expect("HMAC key size");
         mac.update(message.as_bytes());
-        let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let signature = base64::engine::general_purpose::URL_SAFE.encode(mac.finalize().into_bytes());
 
         let url = format!("{}{}", CLOB_HOST, path);
         let response = self.http_client.delete(&url)

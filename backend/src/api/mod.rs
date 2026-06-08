@@ -127,6 +127,7 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/positions/live", get(orders::get_live_positions))
         .route("/settings", get(settings::get_settings).put(settings::update_settings))
         .route("/settings/validate", post(settings::validate_key))
+        .route("/settings/rotate-api-key", post(settings::rotate_api_key))
         .route("/settings/derive", post(settings::derive_key))
         .route("/settings/validate-existing", post(settings::validate_existing))
         .route("/settings/validate-with-balance", post(settings::validate_with_balance))

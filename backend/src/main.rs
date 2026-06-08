@@ -34,18 +34,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let pool = db.as_ref();
         let users = sqlx::query("SELECT id FROM users").fetch_all(pool).await.unwrap_or_default();
+        let mut loaded_count = 0usize;
+        let mut incomplete_count = 0usize;
         for user_row in users {
             let user_id: i64 = user_row.get("id");
             if let Ok(keys) = db::queries::get_api_keys(&db, user_id).await {
                 let pk = keys.iter().find(|k| k.key_name == "polymarket_private_key").map(|k| k.key_value.clone());
+                let api_key_val = keys.iter().find(|k| k.key_name == "polymarket_api_key").map(|k| k.key_value.clone()).unwrap_or_default();
+                let api_secret_val = keys.iter().find(|k| k.key_name == "polymarket_api_secret").map(|k| k.key_value.clone()).unwrap_or_default();
+                let api_passphrase_val = keys.iter().find(|k| k.key_name == "polymarket_passphrase").map(|k| k.key_value.clone()).unwrap_or_default();
+
                 if let Some(private_key) = pk {
+                    // FIX: Ha bármely HMAC kulcs hiányzik, logoljuk részletesen és ugorjuk át
+                    if api_key_val.len() < 5 || api_secret_val.len() < 5 || api_passphrase_val.len() < 5 {
+                        tracing::warn!(
+                            "User {} has a private key but incomplete HMAC credentials (api_key={}, secret={}, passphrase={}). \
+                             Live trading will be blocked until all credentials are re-saved in Settings.",
+                            user_id,
+                            if api_key_val.len() >= 5 { "OK" } else { "MISSING" },
+                            if api_secret_val.len() >= 5 { "OK" } else { "MISSING" },
+                            if api_passphrase_val.len() >= 5 { "OK" } else { "MISSING" },
+                        );
+                        incomplete_count += 1;
+                        continue;
+                    }
+
                     // Read stored settings from api_keys table
                     let funder = keys.iter().find(|k| k.key_name == "polymarket_funder").map(|k| k.key_value.clone());
                     let signature_type_str = keys.iter().find(|k| k.key_name == "polymarket_signature_type").map(|k| k.key_value.clone());
                     let signature_type: u8 = signature_type_str.and_then(|s| s.parse().ok()).unwrap_or(0);
                     let wallet_address = match trading::PolymarketClient::new(&private_key) {
                         Ok(client) => client.address(),
-                        Err(_) => String::new(),
+                        Err(e) => {
+                            tracing::error!("User {} has invalid private key stored: {}", user_id, e);
+                            incomplete_count += 1;
+                            continue;
+                        }
                     };
 
                     // Always load stored deposit wallet address if available.
@@ -54,10 +78,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let deposit_wallet_address = keys.iter()
                         .find(|k| k.key_name == "polymarket_deposit_wallet_address")
                         .map(|k| k.key_value.clone());
-
-                    let api_key_val = keys.iter().find(|k| k.key_name == "polymarket_api_key").map(|k| k.key_value.clone()).unwrap_or_default();
-                    let api_secret_val = keys.iter().find(|k| k.key_name == "polymarket_api_secret").map(|k| k.key_value.clone()).unwrap_or_default();
-                    let api_passphrase_val = keys.iter().find(|k| k.key_name == "polymarket_passphrase").map(|k| k.key_value.clone()).unwrap_or_default();
 
                     // If secret is empty (V2 key without secret/passphrase), try to derive
                     // Use the FULL derived credentials from the CLOB (key, secret, passphrase)
@@ -93,13 +113,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         private_key,
                         funder,
                         signature_type,
-                        wallet_address,
+                        wallet_address: wallet_address.clone(),
                         deposit_wallet_address,
                     });
+                    tracing::info!("Loaded credentials for user {} (wallet: {}, sig_type: {})", user_id, wallet_address, signature_type);
+                    loaded_count += 1;
                 }
             }
         }
-        tracing::info!("Credential cache loaded");
+        tracing::info!("Credential cache loaded: {} user(s) ready, {} incomplete (check Settings)", loaded_count, incomplete_count);
     }
 
     // === MINDEN BOT STÁTUSZÁT "stopped"-ra ÁLLÍTJUK INDULÁSKOR ===

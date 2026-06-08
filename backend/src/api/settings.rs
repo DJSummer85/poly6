@@ -256,7 +256,41 @@ pub async fn store_credentials(
         Ok(_) => {
             tracing::info!("Stored credentials for user {} (wallet: {})", user_id, wallet_address);
 
+            // FIX: Mindig írjuk az api_keys táblába is, hogy szerver restart után
+            // a main.rs startup cache-load meg tudja találni a kulcsokat.
+            let sig_type_str = signature_type.to_string();
+            let keys_to_store: &[(&str, &str)] = &[
+                ("polymarket_api_key",        &payload.api_key),
+                ("polymarket_api_secret",     &payload.api_secret),
+                ("polymarket_passphrase",     &payload.api_passphrase),
+                ("polymarket_private_key",    &payload.private_key),
+                ("polymarket_signature_type", &sig_type_str),
+            ];
+            for (k, v) in keys_to_store {
+                if let Err(e) = queries::upsert_api_key(&db, user_id, k, v, true).await {
+                    tracing::warn!("Failed to mirror {} to api_keys: {}", k, e);
+                }
+            }
+            if let Some(ref f) = payload.funder {
+                if let Err(e) = queries::upsert_api_key(&db, user_id, "polymarket_funder", f, true).await {
+                    tracing::warn!("Failed to mirror funder to api_keys: {}", e);
+                }
+            }
+
             // Populate in-memory credential cache for live trading
+            // FIX: deposit_wallet_address-t csak signature_type==3 esetén töltsük be,
+            // különben a place_order POLY_1271 módba kapcsol véletlenül.
+            let deposit_wallet_address = if signature_type == 3 {
+                queries::get_api_keys(&db, user_id).await.ok()
+                    .and_then(|keys| {
+                        keys.into_iter()
+                            .find(|k| k.key_name == "polymarket_deposit_wallet_address")
+                            .map(|k| k.key_value)
+                    })
+            } else {
+                None
+            };
+
             {
                 let mut cache = state.credential_cache.write().await;
                 cache.insert(user_id, crate::api::CachedCredentials {
@@ -267,7 +301,7 @@ pub async fn store_credentials(
                     funder: payload.funder.clone(),
                     signature_type,
                     wallet_address: wallet_address.clone(),
-                    deposit_wallet_address: None,
+                    deposit_wallet_address,
                 });
             }
 
@@ -393,7 +427,13 @@ pub async fn update_settings(
         }
     };
 
-    // Step 2: Validate credentials by checking balance
+    // Step 2: Set derived credentials on client and validate
+    client = client.with_creds(crate::trading::polymarket::ApiKeyCreds {
+        key: derived_creds.key.clone(),
+        secret: derived_creds.secret.clone(),
+        passphrase: derived_creds.passphrase.clone(),
+    });
+
     tracing::info!("Validating credentials for {}", client.address());
 
     let validation = match client.get_balance_allowance().await {
@@ -451,6 +491,38 @@ pub async fn update_settings(
             state.credential_service.set_password(user_id, payload.password).await;
             state.credential_service.invalidate_cache(user_id).await;
 
+            // FIX: Mirror to api_keys table so main.rs startup cache-load finds them after restart
+            let sig_type_str2 = signature_type.to_string();
+            let mirror_keys: &[(&str, &str)] = &[
+                ("polymarket_api_key",        &derived_creds.key),
+                ("polymarket_api_secret",     &derived_creds.secret),
+                ("polymarket_passphrase",     &derived_creds.passphrase),
+                ("polymarket_private_key",    private_key),
+                ("polymarket_signature_type", &sig_type_str2),
+            ];
+            for (k, v) in mirror_keys {
+                if let Err(e) = queries::upsert_api_key(&db, user_id, k, v, true).await {
+                    tracing::warn!("Failed to mirror {} to api_keys: {}", k, e);
+                }
+            }
+            if let Some(ref f) = payload.funder {
+                if let Err(e) = queries::upsert_api_key(&db, user_id, "polymarket_funder", f, true).await {
+                    tracing::warn!("Failed to mirror funder to api_keys: {}", e);
+                }
+            }
+
+            // FIX: deposit_wallet_address only for signature_type==3
+            let deposit_wallet_address = if signature_type == 3 {
+                queries::get_api_keys(&db, user_id).await.ok()
+                    .and_then(|keys| {
+                        keys.into_iter()
+                            .find(|k| k.key_name == "polymarket_deposit_wallet_address")
+                            .map(|k| k.key_value)
+                    })
+            } else {
+                None
+            };
+
             {
                 let mut cache = state.credential_cache.write().await;
                 cache.insert(user_id, crate::api::CachedCredentials {
@@ -461,7 +533,7 @@ pub async fn update_settings(
                     funder: payload.funder.clone(),
                     signature_type,
                     wallet_address: client.address(),
-                    deposit_wallet_address: None,
+                    deposit_wallet_address,
                 });
             }
 
@@ -686,6 +758,100 @@ pub async fn refresh_credential_cache(
     })).into_response()
 }
 
+/// POST /settings/rotate-api-key - Delete existing API key on Polymarket CLOB and create a fresh one
+/// Use this when the stored API key is invalid/mismatched and needs to be regenerated.
+pub async fn rotate_api_key(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<DeriveKeyRequest>,
+) -> Response {
+    let user_id = claims.user_id;
+    let private_key = payload.polymarket_private_key.trim();
+    let signature_type = payload.signature_type.unwrap_or(0);
+
+    let mut client = match PolymarketClient::new(private_key) {
+        Ok(c) => c.with_signature_type(signature_type),
+        Err(e) => return Json(ErrorResponse { error: format!("Invalid private key: {}", e) }).into_response(),
+    };
+
+    let address_str = client.address();
+    tracing::info!("Rotating API key for wallet {}", address_str);
+
+    // Step 1: DELETE existing key on Polymarket CLOB via L1 auth
+    {
+        let ts = chrono::Utc::now().timestamp().to_string();
+        let nonce = ethers::types::U256::zero();
+        let message_str = "This message attests that I control the given wallet";
+        match PolymarketClient::build_l1_headers(private_key, &address_str, &ts, nonce, message_str) {
+            Ok(headers) => {
+                let http = reqwest::Client::new();
+                match http.delete(format!("{}/auth/api-key", crate::trading::polymarket::CLOB_HOST))
+                    .headers(headers)
+                    .send().await
+                {
+                    Ok(r) => tracing::info!("DELETE /auth/api-key: {}", r.status()),
+                    Err(e) => tracing::warn!("DELETE /auth/api-key error (continuing anyway): {}", e),
+                }
+            }
+            Err(e) => tracing::warn!("Could not build L1 headers for DELETE (continuing anyway): {}", e),
+        }
+    }
+
+    // Small delay to let Polymarket process the deletion
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Step 2: Create fresh API key
+    let new_creds = match client.create_or_derive_api_key().await {
+        Ok(c) => c,
+        Err(e) => return Json(ErrorResponse { error: format!("Failed to create new API key: {}", e) }).into_response(),
+    };
+
+    tracing::info!("New API key created: {}", new_creds.key);
+
+    // Step 3: Save to DB (api_keys table)
+    let db = state.db();
+    let sig_type_str = signature_type.to_string();
+    let keys_to_save: &[(&str, &str)] = &[
+        ("polymarket_api_key",        &new_creds.key),
+        ("polymarket_api_secret",     &new_creds.secret),
+        ("polymarket_passphrase",     &new_creds.passphrase),
+        ("polymarket_private_key",    private_key),
+        ("polymarket_signature_type", &sig_type_str),
+    ];
+    for (k, v) in keys_to_save {
+        if let Err(e) = queries::upsert_api_key(&db, user_id, k, v, true).await {
+            tracing::warn!("Failed to save {} to DB: {}", k, e);
+        }
+    }
+
+    // Step 4: Update in-memory credential cache
+    let wallet_address = client.address();
+    {
+        let mut cache = state.credential_cache.write().await;
+        if let Some(existing) = cache.get(&user_id).cloned() {
+            cache.insert(user_id, crate::api::CachedCredentials {
+                api_key: new_creds.key.clone(),
+                api_secret: new_creds.secret.clone(),
+                api_passphrase: new_creds.passphrase.clone(),
+                private_key: private_key.to_string(),
+                signature_type,
+                wallet_address: wallet_address.clone(),
+                funder: existing.funder,
+                deposit_wallet_address: existing.deposit_wallet_address,
+            });
+        }
+    }
+
+    tracing::info!("API key rotated successfully for user {} (wallet: {})", user_id, wallet_address);
+
+    Json(serde_json::json!({
+        "success": true,
+        "api_key": new_creds.key,
+        "wallet_address": wallet_address,
+        "message": "API key rotated successfully",
+    })).into_response()
+}
+
 /// Derive API key without storing (for testing/dry run)
 pub async fn derive_key(
     State(_state): State<AppState>,
@@ -793,6 +959,12 @@ pub async fn store_api_keys(
 
     if payload.provider == "telegram" {
         state.telegram_service.invalidate_cache(claims.user_id).await;
+    }
+
+    // FIX: Ha polymarket kulcsokat tároltak, frissítsük a credential cache-t is
+    if payload.provider == "polymarket" {
+        populate_credential_cache(&state, claims.user_id).await;
+        tracing::info!("Credential cache refreshed after storing polymarket keys for user {}", claims.user_id);
     }
 
     Json(serde_json::json!({ "success": true, "message": "Keys stored successfully" })).into_response()

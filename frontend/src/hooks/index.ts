@@ -9,6 +9,8 @@ export {
   useLivePositions,
   useLogin,
   useLogs,
+  useMarketCondition,
+  useMarketRecommendation,
   useMarkets,
   useOrders,
   usePlaceOrder,

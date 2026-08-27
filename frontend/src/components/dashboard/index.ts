@@ -5,5 +5,6 @@ export { BotSelector } from "./bot-selector";
 export { ChartPanel } from "./chart-panel";
 export { CommandCenter } from "./command-center";
 export { Dashboard } from "./main";
+export { MarketConditionPanel } from "./market-condition-panel";
 export { MarketHistory } from "./market-history";
 export { QuickTradePanel } from "./quick-trade-panel";

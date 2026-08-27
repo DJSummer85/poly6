@@ -8,6 +8,8 @@ import type {
   CreateBotRequest,
   LoginResponse,
   Market,
+  MarketConditionResponse,
+  MarketRecommendationResponse,
   Order,
   PlaceOrderRequest,
   PortfolioResponse,
@@ -287,6 +289,23 @@ export function useBtcPrice() {
     queryKey: ["btc-price"],
     queryFn: () => apiFetch<{ price: number }>("/market/btc-price"),
     refetchInterval: 1000,
+  });
+}
+
+// Market Condition
+export function useMarketCondition() {
+  return useQuery({
+    queryKey: ["market-condition"],
+    queryFn: () => apiFetch<MarketConditionResponse>("/market/condition"),
+    refetchInterval: 30000,
+  });
+}
+
+export function useMarketRecommendation() {
+  return useQuery({
+    queryKey: ["market-recommendation"],
+    queryFn: () => apiFetch<MarketRecommendationResponse>("/market/recommend"),
+    refetchInterval: 30000,
   });
 }
 

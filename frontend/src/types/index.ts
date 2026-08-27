@@ -328,6 +328,47 @@ export interface MarketUpdateEvent {
   time_remaining?: number;
 }
 
+// Market Condition
+export interface MarketCondition {
+  regime: "trending" | "ranging" | "volatile" | "unknown";
+  confidence: number;
+  trend_strength: number;
+  volatility: number;
+  avg_price_change: number;
+  price_range_pct: number;
+  velocity: number;
+  acceleration: number;
+  recommended_strategies: StrategyRecommendation[];
+  summary: string;
+}
+
+export interface StrategyRecommendation {
+  strategy: string;
+  name: string;
+  reason: string;
+  suitability: number;
+}
+
+export interface MarketConditionResponse {
+  condition: MarketCondition;
+  btc_price: number;
+  source: string;
+}
+
+export interface BotRecommendation {
+  bot_id: number;
+  bot_name: string;
+  strategy: string;
+  match_score: number;
+  reason: string;
+}
+
+export interface MarketRecommendationResponse {
+  condition: MarketCondition;
+  recommendations: BotRecommendation[];
+  summary: string;
+}
+
 // API Response Types
 export interface ApiResponse<T> {
   success: boolean;

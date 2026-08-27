@@ -22,6 +22,7 @@ import { useEffect, useState } from "react";
 import { ActivityTabs } from "@/components/dashboard/activity-tabs";
 import { BotSelector } from "@/components/dashboard/bot-selector";
 import { ChartPanel } from "@/components/dashboard/chart-panel";
+import { MarketConditionPanel } from "@/components/dashboard/market-condition-panel";
 import { MarketHistory } from "@/components/dashboard/market-history";
 import { QuickTradePanel } from "@/components/dashboard/quick-trade-panel";
 import { RiskMetricsPanel } from "@/components/dashboard/risk-metrics-panel";
@@ -461,6 +462,11 @@ export function CommandCenter() {
       >
         <RiskMetricsPanel />
       </CollapsiblePanel>
+
+      {/* 3.5 Market Condition */}
+      <div className="px-4">
+        <MarketConditionPanel />
+      </div>
 
       {/* 4. Trading & Chart */}
       <CollapsiblePanel

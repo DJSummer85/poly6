@@ -16,6 +16,8 @@ use crate::trading::orchestrator::{BotOrchestrator, BotEvent};
 pub mod auth;
 pub mod binance;
 pub mod bots;
+pub mod ai;
+pub mod ai_live_readiness;
 pub mod funding;
 pub mod live_readiness;
 pub mod market;
@@ -26,6 +28,7 @@ pub mod settings;
 pub mod sse;
 pub mod risk_snapshots;
 pub mod strategy_tests;
+pub mod market_condition;
 pub mod telegram;
 pub mod user;
 
@@ -47,6 +50,9 @@ pub struct CachedCredentials {
     pub api_key: String,
     pub api_secret: String,
     pub api_passphrase: String,
+    pub builder_api_key: Option<String>,
+    pub builder_secret: Option<String>,
+    pub builder_passphrase: Option<String>,
     pub private_key: String,
     pub funder: Option<String>,
     pub signature_type: u8,
@@ -57,7 +63,7 @@ pub struct CachedCredentials {
 impl AppState {
     pub fn new(db: Db) -> Self {
         let (event_sender, event_receiver) = mpsc::unbounded_channel::<BotEvent>();
-        let (broadcaster, _) = broadcast::channel(100);
+        let (broadcaster, _) = broadcast::channel(500);
 
         let telegram_service = Arc::new(TelegramService::new(db.clone()));
         let orchestrator = Arc::new(BotOrchestrator::new(db.clone(), event_sender).with_telegram(telegram_service.clone()));
@@ -88,9 +94,10 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/market/price", get(market::get_market_price))
         .route("/market/list", get(market::list_markets))
         .route("/market/active", get(market::get_active_markets))
+        .route("/market/condition", get(market_condition::get_market_condition))
+        .route("/market/recommend", get(market_condition::get_market_recommendation))
         .route("/events", get(sse::bot_events_stream))
-        .route("/strategies", get(strategy_tests::list_strategies))
-        .route("/live-readiness", get(live_readiness::get_live_readiness));
+        .route("/debug/market-chain", get(market::debug_market_chain));
 
     let protected_routes = Router::new()
         .route("/auth/me", get(auth::me))
@@ -101,7 +108,11 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/bots/run-all", post(bots::run_all_bots))   // Megtartva a biztonság kedvéért
         .route("/bots/stop-all", post(bots::stop_all_bots))
         .route("/bots/reset-all", post(bots::reset_all_bots))
+        .route("/bots/reset-demo-balances", post(bots::reset_demo_balances))
+        .route("/bots/set-demo-balance", post(bots::set_demo_balance))
         .route("/bots/set-mode", post(bots::set_all_bots_mode))
+        .route("/bots/bulk-update", post(bots::bulk_update_bots))
+        .route("/bots/reset-params-defaults", post(bots::reset_params_defaults))
         .route("/portfolio", get(bots::get_aggregate_portfolio))
 
         // --- BOTS GENERAL ---
@@ -111,17 +122,29 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/bots/:id", get(bots::get_bot).put(bots::update_bot).delete(bots::delete_bot))
         .route("/bots/:id/start", post(bots::start_bot))
         .route("/bots/:id/stop", post(bots::stop_bot))
+        .route("/bots/:id/stop-trading", post(bots::stop_trading))
+        .route("/bots/:id/sell-position", post(bots::sell_position))
         .route("/bots/:id/reset", post(bots::reset_bot))
         .route("/bots/:id/reset-demo", post(bots::reset_demo_balance))
+        .route("/bots/:id/set-balance", post(bots::set_bot_balance))
         .route("/bots/:id/session", get(bots::get_session))
         .route("/bots/:id/portfolio", get(bots::get_portfolio))
         .route("/bots/:id/history", get(bots::get_history))
         .route("/bots/:id/trades", get(bots::get_trades))
         .route("/bots/:id/status", get(monitoring::get_bot_status))
 
+        // --- AI ELEMZÉS ---
+        .route("/ai/test", post(ai::test_ai_connection))
+        .route("/ai/advice/:bot_id", post(ai::get_ai_advice))
+        .route("/ai/fit/:bot_id", post(ai::get_ai_fit))
+        .route("/ai/live-readiness/:bot_id", post(ai_live_readiness::get_live_readiness))
+        .route("/ai/analyze-all", post(ai::analyze_all_bots))
+        .route("/ai/fit-all", post(ai::analyze_fleet_fit))
+
         // --- TOVÁBBI ÚTVONALAK ---
         .route("/orders", get(orders::list_orders).post(orders::place_order))
         .route("/orders/quick", post(orders::quick_trade))
+        .route("/orders/quick-demo", post(orders::quick_trade_demo))
         .route("/orders/cancel", post(orders::cancel_order))
         .route("/positions", get(positions::list_positions))
         .route("/positions/live", get(orders::get_live_positions))
@@ -134,12 +157,17 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/settings/store", post(settings::store_key))
         .route("/settings/store-all", post(settings::store_credentials))
         .route("/settings/keys", get(settings::list_api_keys))
+        .route("/settings/reset-polymarket", delete(settings::reset_polymarket_keys))
         .route("/settings/keys/:provider", delete(settings::delete_provider_keys))
         .route("/settings/refresh-cache", post(settings::refresh_credential_cache))
+        .route("/settings/rpc-url", get(settings::get_rpc_url).post(settings::set_rpc_url))
+        .route("/settings/demo-balance", get(settings::get_demo_balance_handler).post(settings::set_demo_balance_handler))
         .route("/settings/keys/store", post(settings::store_api_keys))
         .route("/system/status", get(monitoring::get_system_status))
         .route("/system/logs", get(monitoring::get_logs))
         .route("/system/log", post(monitoring::log_activity))
+        .route("/system/kill-ports", post(monitoring::kill_ports))
+        .route("/system/kill-backend", post(monitoring::kill_backend))
         .route("/risk/bots/:id", get(monitoring::get_bot_risk_status))
         .route("/risk/bots/:id/pause", post(monitoring::pause_bot_risk))
         .route("/risk/bots/:id/resume", post(monitoring::resume_bot_risk))
@@ -162,6 +190,8 @@ pub fn routes(app_state: AppState) -> Router<AppState> {
         .route("/funding/fetch-deposit-wallet", post(funding::fetch_deposit_wallet))
         .route("/funding/deposit-wallet-info", get(funding::get_deposit_wallet_info))
         .route("/funding/deploy-deposit-wallet", post(funding::deploy_deposit_wallet))
+        .route("/trading/modes/readiness", get(live_readiness::get_live_readiness))
+        .route("/funding/create-deposit-wallet-via-relayer", post(funding::create_deposit_wallet_via_relayer))
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             auth_middleware::auth_middleware,
